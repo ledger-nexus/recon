@@ -1,0 +1,13 @@
+node_modules
+.next
+.env
+.env.local
+.env.*.local
+dist
+*.log
+.DS_Store
+coverage
+.vitest-cache
+*.tsbuildinfo
+.prisma/
+prisma/generated/

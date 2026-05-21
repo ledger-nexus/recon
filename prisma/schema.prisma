@@ -1,0 +1,361 @@
+// recon Prisma schema.
+//
+// Two halves:
+//
+//   1. ledger-core models recon QUERIES (LegalEntity, Book, Account,
+//      JournalEntry, JournalLine, Party, Currency, Period, FiscalCalendar).
+//      These mirror the canonical definitions in ledger-core's schema —
+//      column-for-column. recon does NOT migrate these tables; ledger-core
+//      owns the schema. If ledger-core's schema changes upstream, this
+//      copy MUST be re-synced.
+//
+//   2. recon-specific models recon OWNS (BankAccount, BankStatement,
+//      BankStatementLine, ReconciliationMatch, AiSuggestion). These live
+//      only here; `prisma db push` from this repo creates them on top of
+//      the existing ledger-core tables.
+//
+// The two repos share one Postgres database — recon connects with the same
+// DATABASE_URL as ledger-core. Per the universal-schema spec: "Postgres
+// schema dependency is cleaner than npm-package dependency for this
+// domain."
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// ledger-core mirror — DO NOT EDIT without syncing upstream
+// =========================================================================
+
+model LegalEntity {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                 String   @unique
+  name                 String
+  parentEntityId       String?  @db.Uuid
+  functionalCurrencyId String
+  sourceSystem         String?
+  sourceRecordType     String?
+  sourceRecordId       String?
+  sourcePayload        Json?
+  mappingVersion       String?
+  extensions           Json?
+
+  journalEntries JournalEntry[]
+  bankAccounts   BankAccount[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("legal_entity")
+}
+
+model Book {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                String    @unique
+  name                String
+  basis               String
+  reportingCurrencyId String
+  isActive            Boolean   @default(true)
+  extensions          Json?
+
+  journalEntries JournalEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("book")
+}
+
+model Account {
+  id               String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId         String? @db.Uuid
+  code             String
+  name             String
+  type             String
+  normalBalance    String
+  subtype          String?
+  isContra         Boolean @default(false)
+  isControlAccount Boolean @default(false)
+  isBank           Boolean @default(false)
+  parentAccountId  String? @db.Uuid
+  bookScope        String[] @default([])
+  active           Boolean @default(true)
+
+  lines        JournalLine[]
+  bankAccounts BankAccount[]
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("account")
+}
+
+model Party {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId      String? @db.Uuid
+  code          String
+  displayName   String
+  parentPartyId String? @db.Uuid
+
+  journalLines JournalLine[]
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@map("party")
+}
+
+model JournalEntry {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryNumber   String   @unique
+  entityId      String   @db.Uuid
+  entity        LegalEntity @relation(fields: [entityId], references: [id])
+  bookId        String   @db.Uuid
+  book          Book        @relation(fields: [bookId], references: [id])
+  periodId      String?  @db.Uuid
+  documentDate  DateTime @db.Date
+  postingDate   DateTime @db.Date
+  memo          String
+  currencyId    String
+  fxRate        Decimal  @default(1) @db.Decimal(20, 10)
+  source        String   @default("MANUAL")
+  status        String   @default("POSTED")
+  reversalOfId  String?  @db.Uuid
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  lines JournalLine[]
+
+  // Backrefs to recon's own tables.
+  appliedReconciliationMatches ReconciliationMatch[] @relation("AppliedByReconEntry")
+
+  createdAt DateTime @default(now())
+  createdBy String?
+
+  @@index([entityId, bookId, documentDate])
+  @@map("gl_entry_header")
+}
+
+model JournalLine {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId   String @db.Uuid
+  entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  lineNo    Int
+  accountId String @db.Uuid
+  account   Account @relation(fields: [accountId], references: [id])
+
+  partyId        String? @db.Uuid
+  party          Party?  @relation(fields: [partyId], references: [id])
+  itemId         String? @db.Uuid
+  dimensionSetId String? @db.Uuid
+  taxCodeId      String?
+
+  debit  Decimal @default(0) @db.Decimal(18, 4)
+  credit Decimal @default(0) @db.Decimal(18, 4)
+
+  transactionAmount     Decimal @default(0) @db.Decimal(18, 4)
+  transactionCurrencyId String?
+  reportingAmount       Decimal @default(0) @db.Decimal(18, 4)
+  reportingCurrencyId   String?
+
+  description String?
+  extensions  Json?
+
+  // Backref to recon's reconciliation matches.
+  reconciliationMatches ReconciliationMatch[] @relation("MatchedJournalLine")
+
+  @@unique([entryId, lineNo])
+  @@index([accountId])
+  @@map("gl_entry_line")
+}
+
+// =========================================================================
+// recon-owned models — managed by THIS repo
+// =========================================================================
+
+// One BankAccount per Postgres-level bank account that recon reconciles.
+// The link to ledger-core is via accountId (must point to an Account
+// where isBank=true).
+model BankAccount {
+  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId      String  @db.Uuid
+  entity        LegalEntity @relation(fields: [entityId], references: [id])
+  accountId     String  @db.Uuid
+  account       Account     @relation(fields: [accountId], references: [id])
+
+  code          String  @unique  // human-readable, e.g. "CHASE-OPERATING"
+  displayName   String
+  bankName      String?
+  accountNumberLast4 String?
+  currencyId    String  @default("USD")
+  isActive      Boolean @default(true)
+
+  statements    BankStatement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("bank_account")
+}
+
+model BankStatement {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankAccountId   String   @db.Uuid
+  bankAccount     BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  // Source metadata
+  filename        String
+  uploadedAt      DateTime @default(now())
+  uploadedBy      String?
+  format          String   // e.g. "CHASE_CSV_V1", "BOFA_OFX", "GENERIC_CSV"
+  rawPayload      String   // verbatim file content for audit / re-parse
+
+  // Statement period
+  periodStart     DateTime @db.Date
+  periodEnd       DateTime @db.Date
+  openingBalance  Decimal  @db.Decimal(18, 4)
+  closingBalance  Decimal  @db.Decimal(18, 4)
+
+  lines           BankStatementLine[]
+
+  // Aggregate status for the UI
+  totalLines        Int @default(0)
+  matchedLines      Int @default(0)
+  pendingLines      Int @default(0)
+
+  @@index([bankAccountId, periodEnd])
+  @@map("bank_statement")
+}
+
+model BankStatementLine {
+  id            String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  statementId   String @db.Uuid
+  statement     BankStatement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+
+  lineNo        Int    // 1-based order within the statement
+  transactionDate DateTime @db.Date
+  postedDate      DateTime? @db.Date
+  description     String
+  // Signed: positive = deposit / inflow, negative = withdrawal / outflow.
+  // Storing signed keeps the SUM(lines) = closingBalance - openingBalance
+  // invariant trivial to assert.
+  amount        Decimal @db.Decimal(18, 4)
+  runningBalance Decimal? @db.Decimal(18, 4)
+  externalRef   String?  // bank's own transaction id when available
+
+  status        BankLineStatus @default(UNMATCHED)
+
+  matches       ReconciliationMatch[]
+  aiSuggestions AiSuggestion[]
+
+  @@unique([statementId, lineNo])
+  @@index([statementId, status])
+  @@index([transactionDate])
+  @@map("bank_statement_line")
+}
+
+enum BankLineStatus {
+  UNMATCHED       // no match proposed yet
+  PROPOSED        // a match has been suggested (deterministic or AI)
+  MATCHED         // human approved the match
+  IGNORED         // human marked as not requiring reconciliation
+  ADJUSTMENT      // human posted an adjustment JE to resolve the line
+}
+
+// Bridges a BankStatementLine to a JournalLine via ledger-core. One bank
+// line can match one or more JE lines (e.g. split deposits); one JE line
+// can be matched by one bank line (a single deposit clearing).
+model ReconciliationMatch {
+  id                String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankLineId        String @db.Uuid
+  bankLine          BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
+  journalLineId     String @db.Uuid
+  journalLine       JournalLine @relation("MatchedJournalLine", fields: [journalLineId], references: [id])
+
+  // Match source — drives the UI badge color.
+  source            MatchSource
+  confidence        Decimal? @db.Decimal(5, 4)  // 0.00..1.00 from AI; null for deterministic / manual
+  status            MatchStatus @default(PROPOSED)
+
+  // If recon posted an adjustment JE (e.g. for an unbooked bank fee),
+  // the resulting ledger-core entry id lives here. The JE itself is
+  // posted via ledger-core's postJournalEntry with source="AI_APPROVED"
+  // or "MANUAL".
+  appliedByEntryId  String? @db.Uuid
+  appliedByEntry    JournalEntry? @relation("AppliedByReconEntry", fields: [appliedByEntryId], references: [id])
+
+  approvedAt        DateTime?
+  approvedBy        String?
+  rejectedAt        DateTime?
+  rejectedBy        String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([bankLineId, journalLineId])
+  @@index([status])
+  @@map("reconciliation_match")
+}
+
+enum MatchSource {
+  DETERMINISTIC // amount + date + counterparty heuristic
+  AI            // proposed by the AI suggester
+  MANUAL        // human-drawn link
+}
+
+enum MatchStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+// AI proposals are stored separately from ReconciliationMatch so we can
+// keep the model's reasoning + confidence even when it's rejected. This
+// is the audit trail for "did the AI suggest something useful here?"
+model AiSuggestion {
+  id              String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankLineId      String @db.Uuid
+  bankLine        BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
+
+  // Candidates as a JSON array of { journalLineId, confidence, rationale }
+  // in descending confidence order. Stored as JSON because the shape may
+  // evolve as the prompt evolves.
+  candidatesJson  Json
+
+  modelName       String   // e.g. "claude-haiku-4-5"
+  promptHash      String?  // SHA of prompt for cache-hit analytics
+  promptTokens    Int?
+  completionTokens Int?
+  latencyMs       Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([bankLineId])
+  @@map("ai_suggestion")
+}
