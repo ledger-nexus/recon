@@ -26,11 +26,15 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the relationship to ledge
 - ✅ Seed: ties to ledger-core's Northwind seed, creates a sample BankAccount + parsed March 2026 statement
 - ✅ Unit tests for parser + scorer + AI suggester (with mocked Anthropic client — no live API calls in CI)
 
-## What lands next (v0.2-beta)
+## What landed in v0.2-beta
 
-- 🚧 Server Action that posts an adjustment JE via ledger-core's `postJournalEntry` when a bank line is matched but the JE has a different amount (e.g. bank fees the ledger didn't anticipate). This is the path that closes the human-approval → ledger-write loop.
-- 🚧 Per-line "Ignore" + "Mark as adjustment" actions
-- 🚧 `AiSuggestion` audit panel — see what the AI proposed across all bank lines, accepted vs rejected, prompt-cache hit rate
+- ✅ **Cross-repo HTTP bridge** ([`src/lib/ledger-bridge.ts`](src/lib/ledger-bridge.ts)) — recon POSTs to ledger-core's `/api/internal/journal-entries` endpoint (token-gated) to create journal entries. The boundary IS `postJournalEntry`; making it network-shaped keeps each repo's types clean and matches the architectural narrative. See [`docs/ledger-bridge.md`](docs/ledger-bridge.md).
+- ✅ **Adjustment-JE Server Action** ([`src/app/actions/post-adjustment.ts`](src/app/actions/post-adjustment.ts)) — for UNMATCHED bank lines that need a brand-new JE (e.g. a $50 wire fee never booked). Builds a balanced two-line cash + counter-account entry, POSTs via the bridge with `source: "MANUAL"`, creates an APPROVED `ReconciliationMatch` linked to the new entry, flips the bank line to `ADJUSTMENT`.
+- ✅ **Inline adjustment form** on `/statements/[id]` — sits next to "Suggest matches" on UNMATCHED lines.
+
+This closes the loop: AI proposes → human approves OR posts an adjustment → ledger-core writes the entry. AI never touches the ledger.
+
+## What lands next (v0.3 ideas)
 
 ## Quick start
 

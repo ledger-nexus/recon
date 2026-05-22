@@ -10,7 +10,7 @@ The architecture canon is `docs/ARCHITECTURE.md`. Read it before changing how re
 
 ## The non-negotiables
 
-1. **AI suggests; humans approve; ledger-core posts.** No code path in this repo may write to ledger-core's tables directly. Adjustment JEs go through `postJournalEntry` imported from ledger-core's module, with `source: "AI_APPROVED"` for AI-assisted entries and `source: "MANUAL"` for human-only ones.
+1. **AI suggests; humans approve; ledger-core posts.** No code path in this repo may write to ledger-core's tables directly. Adjustment JEs cross the boundary via the HTTP bridge in `src/lib/ledger-bridge.ts`, which POSTs to ledger-core's `/api/internal/journal-entries` endpoint. That endpoint is the ONLY way recon writes to the substrate. AI-influenced entries use `source: "AI_APPROVED"`; human-only entries use `source: "MANUAL"`.
 
 2. **Recon's schema mirror is a contract.** The six ledger-core models in `prisma/schema.prisma` (LegalEntity, Book, Account, Party, JournalEntry, JournalLine) must match ledger-core's definitions column-for-column. If you change them here, you've broken the contract.
 
@@ -32,11 +32,18 @@ The architecture canon is `docs/ARCHITECTURE.md`. Read it before changing how re
 
 See [`docs/ai-matching.md`](docs/ai-matching.md) for the full pipeline + prompt-caching + audit design.
 
-## What's next (v0.2-beta)
+## What's next (v0.2-beta — SHIPPED)
 
-- Server Action that posts adjustment JEs via ledger-core's `postJournalEntry` — for the case where the bank line is matched but the JE amount is off by a small bank fee or rounding. THIS is the path that crosses into ledger-core; treat the import boundary carefully.
-- Per-line "Ignore" + "Mark as adjustment" actions
+- ✅ **Cross-repo HTTP bridge** to ledger-core's `postJournalEntry`. Recon POSTs to `/api/internal/journal-entries` (token-gated, mirrors the existing `/api/admin/reset` pattern). NO source-level coupling between repos — each owns its own Prisma client, the wire format is the only contract. See `docs/ledger-bridge.md`.
+- ✅ **Adjustment-JE Server Action** (`src/app/actions/post-adjustment.ts`) — for UNMATCHED bank lines that need a new JE (classic case: $50 wire fee never booked). Builds a two-line balanced JE (cash + counter), POSTs via the bridge with `source: "MANUAL"`, creates an APPROVED `ReconciliationMatch` linked to the new entry, flips the bank line to `ADJUSTMENT`.
+- ✅ **Inline adjustment form** on `/statements/[id]` — sits next to "Suggest matches" on UNMATCHED lines. Two inputs (counter-account code + memo), one click to post.
+
+## What's next (v0.3 ideas)
+
 - `AiSuggestion` audit panel UI — cache-hit rate, accept/reject rates per model, cost-per-statement
+- Per-line "Ignore" action
+- Smoke-test automation against a dev DB+API key in CI
+- Multi-line adjustments (currently the form only supports a two-line cash+counter JE)
 
 ## Stack
 

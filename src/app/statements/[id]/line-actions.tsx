@@ -14,8 +14,10 @@
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { proposeMatchesAction } from "@/app/actions/propose-matches";
 import { approveMatchAction, rejectMatchAction } from "@/app/actions/decide-match";
+import { postAdjustmentAction } from "@/app/actions/post-adjustment";
 
 export interface ProposalView {
   matchId: string;
@@ -37,9 +39,18 @@ interface Props {
 export function LineActions({ bankLineId, status, proposals }: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [adjAccount, setAdjAccount] = useState("");
+  const [adjMemo, setAdjMemo] = useState("");
+
+  function clearStatus() {
+    setError(null);
+    setSuccess(null);
+  }
 
   function onSuggest() {
-    setError(null);
+    clearStatus();
     startTransition(async () => {
       const res = await proposeMatchesAction(bankLineId);
       if (!res.ok) setError(res.message);
@@ -47,7 +58,7 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
   }
 
   function onApprove(matchId: string) {
-    setError(null);
+    clearStatus();
     startTransition(async () => {
       const res = await approveMatchAction(matchId);
       if (!res.ok) setError(res.message);
@@ -55,32 +66,89 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
   }
 
   function onReject(matchId: string) {
-    setError(null);
+    clearStatus();
     startTransition(async () => {
       const res = await rejectMatchAction(matchId);
       if (!res.ok) setError(res.message);
     });
   }
 
+  function onAdjust() {
+    clearStatus();
+    if (!adjAccount.trim()) {
+      setError("Counter-account code is required (e.g. 6500 for bank fees)");
+      return;
+    }
+    startTransition(async () => {
+      const res = await postAdjustmentAction({
+        bankLineId,
+        counterAccountCode: adjAccount.trim(),
+        memo: adjMemo.trim() || undefined,
+      });
+      if (!res.ok) {
+        setError(res.message);
+      } else {
+        setSuccess(res.message);
+        setAdjustOpen(false);
+        setAdjAccount("");
+        setAdjMemo("");
+      }
+    });
+  }
+
   if (status === "MATCHED") {
     return <span className="text-xs text-ink-400">approved</span>;
   }
-  if (status === "IGNORED" || status === "ADJUSTMENT") {
+  if (status === "ADJUSTMENT") {
+    return <span className="text-xs text-ink-400">adjustment posted</span>;
+  }
+  if (status === "IGNORED") {
     return <span className="text-xs text-ink-400">—</span>;
   }
 
   if (status === "UNMATCHED" || proposals.length === 0) {
     return (
-      <div className="flex flex-col items-end gap-1">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={onSuggest}
-          disabled={pending}
-        >
-          {pending ? "Thinking…" : "Suggest matches"}
-        </Button>
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={onSuggest} disabled={pending}>
+            {pending ? "Thinking…" : "Suggest matches"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              clearStatus();
+              setAdjustOpen((v) => !v);
+            }}
+            disabled={pending}
+          >
+            {adjustOpen ? "Cancel" : "Post adjustment"}
+          </Button>
+        </div>
+        {adjustOpen ? (
+          <div className="flex w-72 flex-col gap-1.5 rounded-md border border-ink-200 bg-white p-2">
+            <div className="text-[11px] text-ink-500">
+              Posts a two-line JE through ledger-core: cash + counter-account, signed to match the bank line.
+            </div>
+            <Input
+              placeholder="Counter account code (e.g. 6500)"
+              value={adjAccount}
+              onChange={(e) => setAdjAccount(e.target.value)}
+              disabled={pending}
+            />
+            <Input
+              placeholder="Memo (optional)"
+              value={adjMemo}
+              onChange={(e) => setAdjMemo(e.target.value)}
+              disabled={pending}
+            />
+            <Button size="sm" onClick={onAdjust} disabled={pending}>
+              {pending ? "Posting…" : "Post via ledger-core"}
+            </Button>
+          </div>
+        ) : null}
         {error ? <span className="text-[11px] text-negative">{error}</span> : null}
+        {success ? <span className="text-[11px] text-positive">{success}</span> : null}
       </div>
     );
   }
