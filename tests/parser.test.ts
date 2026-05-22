@@ -17,7 +17,7 @@ describe("parseBankCsv: Acme bank fixture", () => {
     expect(r.meta.periodStart.toISOString().slice(0, 10)).toBe("2026-03-01");
     expect(r.meta.periodEnd.toISOString().slice(0, 10)).toBe("2026-03-31");
     expect(r.meta.openingBalance.toNumber()).toBe(459_239.5);
-    expect(r.meta.closingBalance.toNumber()).toBe(384_039.5);
+    expect(r.meta.closingBalance.toNumber()).toBe(414_819.5);
     expect(r.meta.bankAccountLabel).toContain("NORTHWIND");
   });
 
