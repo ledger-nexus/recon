@@ -14,6 +14,10 @@ const sections: { label: string; items: { href: string; label: string; hint?: st
       { href: "/accounts", label: "Bank accounts" },
     ],
   },
+  {
+    label: "Audit",
+    items: [{ href: "/ai-audit", label: "AI usage" }],
+  },
 ];
 
 export function Sidebar({ currentPath }: { currentPath?: string }) {
