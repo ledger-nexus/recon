@@ -58,7 +58,7 @@ model Book {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code                String    @unique
   name                String
-  basis               String
+  basis               BookBasis
   reportingCurrencyId String
   isActive            Boolean   @default(true)
   extensions          Json?
@@ -76,8 +76,8 @@ model Account {
   entityId         String? @db.Uuid
   code             String
   name             String
-  type             String
-  normalBalance    String
+  type             AccountType
+  normalBalance    NormalBalance
   subtype          String?
   isContra         Boolean @default(false)
   isControlAccount Boolean @default(false)
@@ -139,8 +139,8 @@ model JournalEntry {
   memo          String
   currencyId    String
   fxRate        Decimal  @default(1) @db.Decimal(20, 10)
-  source        String   @default("MANUAL")
-  status        String   @default("POSTED")
+  source        JournalSource @default(MANUAL)
+  status        EntryStatus   @default(POSTED)
   reversalOfId  String?  @db.Uuid
 
   sourceSystem     String?
@@ -358,4 +358,47 @@ model AiSuggestion {
 
   @@index([bankLineId])
   @@map("ai_suggestion")
+}
+
+// =========================================================================
+// Enums mirrored from ledger-core. MUST stay in sync. These exist in the
+// shared DB because ledger-core created them; recon's mirror needs the
+// matching type so Prisma db push from this repo doesn't try to alter
+// the columns ledger-core owns.
+// =========================================================================
+
+enum BookBasis {
+  US_GAAP
+  US_TAX
+  IFRS
+  MGMT
+  STATUTORY
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum JournalSource {
+  MANUAL
+  SEED
+  SYSTEM
+  AI_APPROVED
+  IMPORT
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  VOID
+  REVERSED
 }
