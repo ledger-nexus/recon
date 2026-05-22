@@ -1,6 +1,10 @@
-// Statement detail page. Shows every parsed line with its current match
-// status. v0.1 is read-only — the interactive approve/reject UI for
-// proposed matches lands in v0.2 alongside the AI suggester.
+// Statement detail page. Shows every parsed bank line, its current match
+// status, and (in v0.2) interactive controls to:
+//   - request match suggestions (deterministic + AI Haiku)
+//   - approve / reject proposed matches inline
+//
+// The page is a Server Component. The per-row buttons live in a Client
+// Component (line-actions.tsx) that calls Server Actions directly.
 
 import Link from "next/link";
 import { Decimal } from "decimal.js";
@@ -10,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, moneyClass } from "@/lib/utils/format";
+import { LineActions, type ProposalView } from "./line-actions";
 
 export default async function StatementDetailPage({
   params,
@@ -24,6 +29,8 @@ export default async function StatementDetailPage({
         orderBy: { lineNo: "asc" },
         include: {
           matches: {
+            where: { status: { in: ["PROPOSED", "APPROVED"] } },
+            orderBy: [{ status: "asc" }, { confidence: "desc" }],
             include: {
               journalLine: {
                 select: {
@@ -85,7 +92,7 @@ export default async function StatementDetailPage({
         <CardHeader>
           <CardTitle>Statement lines</CardTitle>
           <span className="text-xs text-ink-500">
-            v0.1 is read-only. Interactive approve / reject + AI suggestions arrive in v0.2.
+            Click <span className="font-medium">Suggest matches</span> to run the deterministic + AI pipeline. Then approve or reject each proposal.
           </span>
         </CardHeader>
         <CardContent>
@@ -96,28 +103,38 @@ export default async function StatementDetailPage({
                 <TH>Date</TH>
                 <TH>Description</TH>
                 <TH className="text-right">Amount</TH>
-                <TH className="text-right">Running</TH>
                 <TH>Status</TH>
-                <TH>Match</TH>
+                <TH>Action</TH>
               </tr>
             </THead>
             <TBody>
               {statement.lines.map((line) => {
-                const topMatch = line.matches[0];
+                const proposals: ProposalView[] = line.matches.map((m) => {
+                  const signed = new Decimal(m.journalLine.debit.toString()).minus(
+                    new Decimal(m.journalLine.credit.toString())
+                  );
+                  return {
+                    matchId: m.id,
+                    journalLineId: m.journalLineId,
+                    source: m.source,
+                    confidence: m.confidence !== null ? Number(m.confidence.toString()) : null,
+                    entryNumber: m.journalLine.entry.entryNumber,
+                    entryMemo: m.journalLine.entry.memo,
+                    entryDate: formatDate(m.journalLine.entry.documentDate),
+                    signedAmount: formatMoney(signed),
+                  };
+                });
                 return (
                   <TR key={line.id}>
-                    <TD className="text-ink-400">{line.lineNo}</TD>
-                    <TD className="text-ink-500">{formatDate(line.transactionDate)}</TD>
-                    <TD className="text-ink-900">{line.description}</TD>
+                    <TD className="text-ink-400 align-top">{line.lineNo}</TD>
+                    <TD className="text-ink-500 align-top">{formatDate(line.transactionDate)}</TD>
+                    <TD className="text-ink-900 align-top">{line.description}</TD>
                     <TD
-                      className={`amount-cell text-right ${moneyClass(line.amount.toString())}`}
+                      className={`amount-cell text-right align-top ${moneyClass(line.amount.toString())}`}
                     >
                       {formatMoney(line.amount.toString())}
                     </TD>
-                    <TD className="amount-cell text-right text-ink-500">
-                      {line.runningBalance ? formatMoney(line.runningBalance.toString()) : "—"}
-                    </TD>
-                    <TD>
+                    <TD className="align-top">
                       <Badge
                         tone={
                           line.status === "MATCHED"
@@ -134,14 +151,12 @@ export default async function StatementDetailPage({
                         {line.status}
                       </Badge>
                     </TD>
-                    <TD className="text-xs">
-                      {topMatch ? (
-                        <span className="font-mono text-ink-700">
-                          {topMatch.journalLine.entry.entryNumber}
-                        </span>
-                      ) : (
-                        <span className="text-ink-400">—</span>
-                      )}
+                    <TD className="align-top">
+                      <LineActions
+                        bankLineId={line.id}
+                        status={line.status}
+                        proposals={proposals.filter((p) => p.source !== "MANUAL" || line.status === "PROPOSED")}
+                      />
                     </TD>
                   </TR>
                 );

@@ -18,20 +18,25 @@ The architecture canon is `docs/ARCHITECTURE.md`. Read it before changing how re
 
 4. **Deterministic match scoring stays deterministic.** No model calls inside `src/lib/matching/deterministic.ts`. The AI suggester lives in `src/lib/matching/ai-suggest.ts` (v0.2+) and is invoked separately.
 
-## What's wired (v0.1)
+## What's wired (v0.2)
 
 - Bank statement CSV parser with reconciliation check
 - Deterministic match scoring (amount + date + description tokens)
-- Next.js UI: dashboard, statements list, upload form, statement detail
+- **AI match suggester** — `src/lib/matching/ai-suggest.ts`. Claude Haiku 4.5 via the official `@anthropic-ai/sdk`, forced-tool-use for structured output, prompt caching on the system prefix, hallucinated-ID filter.
+- **Candidate-fetching helper** — `src/lib/matching/candidates.ts`. Pulls JE lines from ledger-core's cash account by signed-amount + ±5-day window, excludes already-APPROVED matches.
+- **Match Server Actions** — `src/app/actions/propose-matches.ts` (deterministic + AI pipeline, persists `AiSuggestion` for audit), `src/app/actions/decide-match.ts` (approve / reject, sibling withdrawal, statement counter updates).
+- **Interactive UI** — `/statements/[id]` shows "Suggest matches" per UNMATCHED line, ranked proposal cards with source badges (AI / DETERMINISTIC) and confidence percentages, inline Approve / Reject buttons.
+- Next.js UI: dashboard, statements list, upload form, statement detail (interactive)
 - Sample fixture: Acme Bank March 2026 (9 lines, ties to Northwind seed)
-- Unit tests for parser + scorer
+- Unit tests for parser + scorer + AI suggester (mocked SDK)
 
-## What's next (v0.2)
+See [`docs/ai-matching.md`](docs/ai-matching.md) for the full pipeline + prompt-caching + audit design.
 
-- Claude API integration for AI match proposals — **invoke the `claude-api` skill when implementing this**. Prompt caching is mandatory per the skill's guidance (the candidate-JE list is similar across many bank lines).
-- Interactive approve/reject UI on statement detail
-- Server Action that posts adjustment JEs via ledger-core's postJournalEntry
-- `AiSuggestion` audit panel
+## What's next (v0.2-beta)
+
+- Server Action that posts adjustment JEs via ledger-core's `postJournalEntry` — for the case where the bank line is matched but the JE amount is off by a small bank fee or rounding. THIS is the path that crosses into ledger-core; treat the import boundary carefully.
+- Per-line "Ignore" + "Mark as adjustment" actions
+- `AiSuggestion` audit panel UI — cache-hit rate, accept/reject rates per model, cost-per-statement
 
 ## Stack
 
@@ -54,10 +59,13 @@ Always use `Decimal` from `decimal.js`. Bank amounts are signed (positive = depo
 
 ### AI integration (v0.2+)
 - Use the `claude-api` skill when adding AI features.
-- Default model: `claude-haiku-4-5` for match suggestions (fast + cheap; matching is a structured-output task, not deep reasoning).
-- Prompt caching ON for the candidate-JE list portion of every prompt.
-- Store every AI suggestion in `AiSuggestion` for audit, even if the human rejects it.
+- Default model: `claude-haiku-4-5` for match suggestions (fast + cheap; matching is a structured-output task, not deep reasoning). Do NOT switch to Opus just because the skill suggests it as default — this is an explicit project choice.
+- Prompt caching ON via `cache_control: { type: "ephemeral" }` on the stable system-prompt prefix. The volatile per-call payload goes in the user message.
+- **Structured output**: this repo is on `@anthropic-ai/sdk` 0.65, which does NOT expose `messages.parse` / `output_config` / `zodOutputFormat`. Use the **forced tool-use pattern** instead — declare a single tool with a JSON Schema (derived from Zod via `zod-to-json-schema`), set `tool_choice: { type: "tool", name }`, extract the `tool_use` block, validate via `schema.parse()`. When the SDK catches up, migrate.
+- Treat edits to the cached system prompt like a schema migration — any byte change invalidates the cache for every downstream call.
+- Store every AI suggestion in `AiSuggestion` for audit, even if the human rejects it OR if the model returns an empty candidates array.
 - The AI never sees data outside the current entity/book/period scope.
+- The AI never writes to the ledger. Adjustment JEs go through `postJournalEntry` AFTER a human click.
 
 ### UI work
 - Same conventions as ledger-core: App Router, Server Components by default, Server Actions for forms, inline UI primitives.

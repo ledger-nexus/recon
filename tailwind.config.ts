@@ -20,6 +20,9 @@ const config: Config = {
         accent: { 500: "#0891b2", 600: "#0e7490" },
         positive: "#15803d",
         negative: "#b91c1c",
+        // Amber for warning / "needs attention" states — dashboard
+        // unmatched-line counter, partial-match badges, etc.
+        warning: "#b45309",
         // AI-suggestion-specific tint so users see at a glance which
         // matches were AI-proposed (vs deterministic vs manual).
         ai: "#7c3aed",
