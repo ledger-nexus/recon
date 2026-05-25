@@ -128,4 +128,67 @@ describe("rankCandidates", () => {
     expect(ranked[2].journalLineId).toBe("wrong-amount");
     expect(ranked[2].score).toBe(0);
   });
+
+  it("returns an empty array when no candidates are passed", () => {
+    const ranked = rankCandidates(
+      { amount: new Decimal(100), date: new Date("2026-03-15"), description: "foo" },
+      []
+    );
+    expect(ranked).toEqual([]);
+  });
+});
+
+describe("scoreCandidate: sign + token edges", () => {
+  it("rejects a sign-flipped match (bank withdrawal vs JE debit) on amount", () => {
+    // Sign discipline: a -$100 bank line should NOT match a +$100 JE debit
+    // (debit-on-cash means money came IN, but the bank says it went out).
+    // amountScore must be 0 so the weighted score collapses to 0.
+    const r = scoreCandidate({
+      bankAmount: new Decimal(-100),
+      bankDate: new Date("2026-03-15"),
+      bankDescription: "FEE",
+      journalLineId: "x",
+      jeDebit: new Decimal(100),
+      jeCredit: new Decimal(0),
+      jeDate: new Date("2026-03-15"),
+      jeMemo: "FEE",
+    });
+    expect(r.components.amountScore).toBe(0);
+    expect(r.score).toBe(0);
+    expect(r.rationale).toMatch(/Amount mismatch/);
+  });
+
+  it("scores party-display-name overlap even when the memo has no shared tokens", () => {
+    // Bank desc references the counterparty by name; the JE memo is
+    // boilerplate ("AR invoice paid") with no overlapping tokens. The
+    // party.displayName has to carry the description score.
+    const r = scoreCandidate({
+      bankAmount: new Decimal(2_500),
+      bankDate: new Date("2026-03-15"),
+      bankDescription: "ACH CREDIT GLOBEX",
+      journalLineId: "x",
+      jeDebit: new Decimal(2_500),
+      jeCredit: new Decimal(0),
+      jeDate: new Date("2026-03-15"),
+      jeMemo: "invoice paid",
+      jePartyDisplayName: "Globex",
+    });
+    expect(r.components.descriptionScore).toBeGreaterThan(0);
+  });
+
+  it("ignores sub-3-char tokens when scoring description overlap", () => {
+    // Tokens "TO" and "AC" are both <3 chars and get filtered. Even though
+    // both sides share every visible word, descriptionScore must be 0.
+    const r = scoreCandidate({
+      bankAmount: new Decimal(100),
+      bankDate: new Date("2026-03-15"),
+      bankDescription: "TO AC",
+      journalLineId: "x",
+      jeDebit: new Decimal(100),
+      jeCredit: new Decimal(0),
+      jeDate: new Date("2026-03-15"),
+      jeMemo: "TO AC",
+    });
+    expect(r.components.descriptionScore).toBe(0);
+  });
 });

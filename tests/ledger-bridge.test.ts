@@ -173,4 +173,54 @@ describe("postEntryViaLedgerCore", () => {
       expect(e).toBeInstanceOf(LedgerCoreError);
     }
   });
+
+  it("surfaces INVALID_LINE from ledger-core with status preserved", async () => {
+    setFetchForTesting(async () =>
+      jsonResponse(
+        { ok: false, error: { code: "INVALID_LINE", message: "line 2 missing accountCode" } },
+        422
+      )
+    );
+    await expect(postEntryViaLedgerCore(baseInput)).rejects.toMatchObject({
+      name: "LedgerCoreError",
+      code: "INVALID_LINE",
+      status: 422,
+    });
+  });
+
+  it("forwards optional bookCode + sourceSystem fields in the request body", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    setFetchForTesting(async (_url, init) => {
+      capturedBody = JSON.parse(init?.body as string);
+      return jsonResponse({
+        ok: true,
+        id: "x",
+        entryNumber: "x",
+        bookCode: "MGMT",
+      });
+    });
+    await postEntryViaLedgerCore({
+      ...baseInput,
+      bookCode: "MGMT",
+      sourceSystem: "RECON",
+      sourceRecordType: "BANK_LINE",
+      sourceRecordId: "stmt-1:line-3",
+    });
+    expect(capturedBody?.bookCode).toBe("MGMT");
+    expect(capturedBody?.sourceSystem).toBe("RECON");
+    expect(capturedBody?.sourceRecordType).toBe("BANK_LINE");
+    expect(capturedBody?.sourceRecordId).toBe("stmt-1:line-3");
+  });
+
+  it("falls back to the default ledger-core URL when LEDGER_CORE_URL is unset", async () => {
+    delete process.env.LEDGER_CORE_URL;
+    let capturedUrl = "";
+    setFetchForTesting(async (url) => {
+      capturedUrl = String(url);
+      return jsonResponse({ ok: true, id: "x", entryNumber: "x", bookCode: "US_GAAP" });
+    });
+    await postEntryViaLedgerCore(baseInput);
+    // The default is http://localhost:3000 (ledger-core's dev port).
+    expect(capturedUrl).toBe("http://localhost:3000/api/internal/journal-entries");
+  });
 });

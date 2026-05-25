@@ -81,3 +81,65 @@ describe("parseBankCsv: failure modes", () => {
     expect(r.lines[0].amount.toNumber()).toBe(-10);
   });
 });
+
+describe("parseBankCsv: format tolerance", () => {
+  it("preserves a quoted comma inside a description cell", () => {
+    // The description has a literal comma that must NOT be treated as a
+    // column separator — parseCsvRow has to honor the surrounding quotes.
+    const csv = `
+"Period: 2026-03-01 to 2026-03-31"
+"Opening Balance: 0"
+"Closing Balance: 500"
+"Date","Description","Amount"
+"2026-03-15","DEPOSIT, ACME INC",500
+`.trim();
+    const r = parseBankCsv(csv);
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0].description).toBe("DEPOSIT, ACME INC");
+    expect(r.lines[0].amount.toNumber()).toBe(500);
+  });
+
+  it("accepts US-format dates (MM/DD/YYYY) and an uppercase DATE header", () => {
+    const csv = `
+"Period: 03/01/2026 to 03/31/2026"
+"Opening Balance: 0"
+"Closing Balance: 250"
+"DATE","DESCRIPTION","AMOUNT"
+"03/15/2026","Refund",250
+`.trim();
+    const r = parseBankCsv(csv);
+    expect(r.meta.periodStart.toISOString().slice(0, 10)).toBe("2026-03-01");
+    expect(r.meta.periodEnd.toISOString().slice(0, 10)).toBe("2026-03-31");
+    expect(r.lines[0].transactionDate.toISOString().slice(0, 10)).toBe("2026-03-15");
+  });
+
+  it("strips $ and thousands-separator commas from amounts and balances", () => {
+    const csv = `
+"Period: 2026-03-01 to 2026-03-31"
+"Opening Balance: $1,000.00"
+"Closing Balance: $61,000.00"
+"Date","Description","Amount"
+"2026-03-15","BIG DEPOSIT","$60,000.00"
+`.trim();
+    const r = parseBankCsv(csv);
+    expect(r.meta.openingBalance.toNumber()).toBe(1_000);
+    expect(r.meta.closingBalance.toNumber()).toBe(61_000);
+    expect(r.lines[0].amount.toNumber()).toBe(60_000);
+  });
+
+  it("accepts 'Posted Date' + 'Memo' as column-name variants", () => {
+    // Real bank CSVs vary: Chase uses "Posting Date" / "Description",
+    // Mercury uses "Date" / "Description", BofA uses "Posted Date" /
+    // "Description" / "Memo". The parser is generous about variants.
+    const csv = `
+"Opening Balance: 0"
+"Closing Balance: 100"
+"Posted Date","Memo","Amount"
+"2026-03-15","whatever",100
+`.trim();
+    const r = parseBankCsv(csv);
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0].description).toBe("whatever");
+    expect(r.lines[0].amount.toNumber()).toBe(100);
+  });
+});

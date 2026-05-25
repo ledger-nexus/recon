@@ -27,6 +27,7 @@ import { prisma } from "@/lib/db";
 import {
   postEntryViaLedgerCore,
   LedgerCoreError,
+  friendlyLedgerError,
   type LedgerJournalEntryInput,
 } from "@/lib/ledger-bridge";
 
@@ -169,7 +170,7 @@ export async function postAdjustmentAction(
     };
   } catch (e) {
     if (e instanceof LedgerCoreError) {
-      return { ok: false, message: `ledger-core ${e.code}: ${e.message}` };
+      return { ok: false, message: friendlyLedgerError(e) };
     }
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
