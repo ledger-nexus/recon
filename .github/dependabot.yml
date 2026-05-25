@@ -1,0 +1,29 @@
+# Dependabot — automatic dependency-update PRs.
+#
+# SOC 2 CC7 expectation: known vulnerabilities in production deps are
+# remediated promptly. Dependabot opens PRs when new versions ship,
+# letting our standard PR-review process gate the upgrade.
+#
+# Schedule is weekly; security updates fire immediately regardless.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    groups:
+      # Group minor + patch updates into a single PR to reduce churn
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+      # Major updates stay separate so they get individual review
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "ci"]
+

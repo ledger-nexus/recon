@@ -1,0 +1,26 @@
+# Code ownership for review routing.
+#
+# SOC 2 CC8 (change management) expectation: pull requests are reviewed
+# by an owner of the affected area before merging. CODEOWNERS routes
+# review requests automatically.
+#
+# Solo-project posture: a single owner is listed for everything, and a
+# "compensating control" applies — the owner uses Claude or other
+# review tooling to provide independent eyes on every PR. Document
+# this in docs/policies/change-management.md.
+#
+# When more contributors join, split ownership by directory (e.g.
+# /src/lib/accounting/  @cpa-owner  for the accounting-core).
+
+* @chrissoncpa
+
+# Critical paths — flagged explicitly so the owner sees they were
+# touched. (Owner is the same person; the comment is the audit signal.)
+/src/lib/accounting/        @chrissoncpa  # substrate write path
+/src/lib/auth/              @chrissoncpa  # access control
+/src/app/api/internal/      @chrissoncpa  # cross-repo HTTP boundary
+/prisma/                    @chrissoncpa  # schema
+/docs/SOC2_READINESS.md     @chrissoncpa
+/docs/policies/             @chrissoncpa
+/.github/                   @chrissoncpa
+

@@ -1,0 +1,62 @@
+# Security CI — runs on every PR and push to main.
+#
+# Three checks:
+#   1. gitleaks — scans for hardcoded secrets (AWS keys, JWT tokens,
+#      Anthropic API keys, Vercel tokens, etc.) across the entire git
+#      history. Catches accidental commits of .env contents or pasted
+#      credentials.
+#   2. npm audit (production-only) — flags known CVEs in production deps.
+#      Devs deps are excluded because they don't ship.
+#   3. CodeQL — GitHub's SAST. Static analysis for JS/TS injection,
+#      auth bypasses, etc.
+#
+# SOC 2 CC7 / CC8 expectation: change management gates include
+# automated security scanning. These are advisory (don't block merge
+# automatically; configure repo settings to require them as status
+# checks). Run them anyway so the evidence exists for an auditor.
+
+name: Security
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly scan catches CVEs published after a quiet week
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      # production-only audit; dev tooling CVEs are not shipped to users
+      - run: npm audit --omit=dev --audit-level=high
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3
+
