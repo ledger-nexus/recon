@@ -232,3 +232,97 @@ export async function proposeMatchesAction(
     };
   }
 }
+
+// ─── Bulk action (v1.0) ───────────────────────────────────────────────────
+
+export interface ProposeAllState {
+  ok: boolean;
+  message: string;
+  total?: number;          // UNMATCHED lines we attempted
+  proposedCount?: number;  // lines where at least one proposal was created
+  noCandidates?: number;   // lines with zero candidate JE lines in window
+  belowThreshold?: number; // lines where candidates existed but none qualified
+  errors?: number;         // per-line failures (counted; full set logged)
+}
+
+/**
+ * Run proposeMatchesAction for every UNMATCHED line in a statement.
+ *
+ * Sequential by design — AI calls are rate-limited at Anthropic's side,
+ * and parallelizing risks 429s without delivering meaningful speedup for
+ * a typical statement (<50 lines). The trade-off is acceptable; if a
+ * customer routinely uploads 500-line statements we can chunk-and-batch.
+ *
+ * Returns aggregate counts so the UI can render "Proposed 6 of 9 lines;
+ * 2 had no candidates; 1 below confidence threshold."
+ */
+export async function proposeAllUnmatchedAction(
+  statementId: string
+): Promise<ProposeAllState> {
+  try {
+    const lines = await prisma.bankStatementLine.findMany({
+      where: { statementId, status: "UNMATCHED" },
+      select: { id: true },
+      orderBy: { lineNo: "asc" },
+    });
+    if (lines.length === 0) {
+      return {
+        ok: true,
+        message: "No unmatched lines on this statement.",
+        total: 0,
+        proposedCount: 0,
+        noCandidates: 0,
+        belowThreshold: 0,
+        errors: 0,
+      };
+    }
+
+    let proposedCount = 0;
+    let noCandidates = 0;
+    let belowThreshold = 0;
+    let errors = 0;
+
+    for (const line of lines) {
+      const result = await proposeMatchesAction(line.id);
+      if (!result.ok) {
+        errors += 1;
+        continue;
+      }
+      // The single-line action's `message` distinguishes the buckets.
+      // Cheap and stable enough for an aggregate counter; full result is
+      // already audit-logged via AiSuggestion rows.
+      if (result.message.startsWith("Proposed ")) {
+        proposedCount += 1;
+      } else if (result.message.includes("No candidate")) {
+        noCandidates += 1;
+      } else if (result.message.includes("met the threshold")) {
+        belowThreshold += 1;
+      }
+    }
+
+    revalidatePath(`/statements/${statementId}`);
+
+    // Human-readable summary; the UI also surfaces structured counts.
+    const parts: string[] = [];
+    if (proposedCount > 0) parts.push(`${proposedCount} proposed`);
+    if (noCandidates > 0) parts.push(`${noCandidates} with no candidates`);
+    if (belowThreshold > 0) parts.push(`${belowThreshold} below threshold`);
+    if (errors > 0) parts.push(`${errors} errored`);
+    const summary = parts.length > 0 ? parts.join(", ") : "no changes";
+
+    return {
+      ok: true,
+      message: `Processed ${lines.length} unmatched line${lines.length === 1 ? "" : "s"}: ${summary}.`,
+      total: lines.length,
+      proposedCount,
+      noCandidates,
+      belowThreshold,
+      errors,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "Unknown error",
+    };
+  }
+}

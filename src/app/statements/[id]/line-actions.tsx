@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { proposeMatchesAction } from "@/app/actions/propose-matches";
 import { approveMatchAction, rejectMatchAction } from "@/app/actions/decide-match";
 import { postAdjustmentAction } from "@/app/actions/post-adjustment";
+import { ignoreLineAction, unignoreLineAction } from "@/app/actions/ignore-line";
 
 export interface ProposalView {
   matchId: string;
@@ -43,10 +44,38 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [adjAccount, setAdjAccount] = useState("");
   const [adjMemo, setAdjMemo] = useState("");
+  const [ignoreOpen, setIgnoreOpen] = useState(false);
+  const [ignoreReason, setIgnoreReason] = useState("");
 
   function clearStatus() {
     setError(null);
     setSuccess(null);
+  }
+
+  function onIgnore() {
+    clearStatus();
+    startTransition(async () => {
+      const res = await ignoreLineAction({
+        bankLineId,
+        reason: ignoreReason.trim() || undefined,
+      });
+      if (!res.ok) {
+        setError(res.message);
+      } else {
+        setSuccess(res.message);
+        setIgnoreOpen(false);
+        setIgnoreReason("");
+      }
+    });
+  }
+
+  function onUnignore() {
+    clearStatus();
+    startTransition(async () => {
+      const res = await unignoreLineAction(bankLineId);
+      if (!res.ok) setError(res.message);
+      else setSuccess(res.message);
+    });
   }
 
   function onSuggest() {
@@ -103,13 +132,26 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
     return <span className="text-xs text-ink-400">adjustment posted</span>;
   }
   if (status === "IGNORED") {
-    return <span className="text-xs text-ink-400">—</span>;
+    return (
+      <div className="flex flex-col items-end gap-1">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onUnignore}
+          disabled={pending}
+        >
+          {pending ? "Working…" : "Restore"}
+        </Button>
+        {error ? <span className="text-[11px] text-negative">{error}</span> : null}
+        {success ? <span className="text-[11px] text-positive">{success}</span> : null}
+      </div>
+    );
   }
 
   if (status === "UNMATCHED" || proposals.length === 0) {
     return (
       <div className="flex flex-col items-end gap-1.5">
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <Button size="sm" variant="outline" onClick={onSuggest} disabled={pending}>
             {pending ? "Thinking…" : "Suggest matches"}
           </Button>
@@ -119,10 +161,23 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
             onClick={() => {
               clearStatus();
               setAdjustOpen((v) => !v);
+              setIgnoreOpen(false);
             }}
             disabled={pending}
           >
-            {adjustOpen ? "Cancel" : "Post adjustment"}
+            {adjustOpen ? "Cancel adjust" : "Post adjustment"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              clearStatus();
+              setIgnoreOpen((v) => !v);
+              setAdjustOpen(false);
+            }}
+            disabled={pending}
+          >
+            {ignoreOpen ? "Cancel ignore" : "Ignore"}
           </Button>
         </div>
         {adjustOpen ? (
@@ -144,6 +199,23 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
             />
             <Button size="sm" onClick={onAdjust} disabled={pending}>
               {pending ? "Posting…" : "Post via ledger-core"}
+            </Button>
+          </div>
+        ) : null}
+        {ignoreOpen ? (
+          <div className="flex w-72 flex-col gap-1.5 rounded-md border border-ink-200 bg-white p-2">
+            <div className="text-[11px] text-ink-500">
+              Mark this line as not requiring reconciliation (internal
+              transfer, already booked, etc.). No JE posted.
+            </div>
+            <Input
+              placeholder="Reason (optional but recommended)"
+              value={ignoreReason}
+              onChange={(e) => setIgnoreReason(e.target.value)}
+              disabled={pending}
+            />
+            <Button size="sm" onClick={onIgnore} disabled={pending}>
+              {pending ? "Working…" : "Mark IGNORED"}
             </Button>
           </div>
         ) : null}

@@ -271,6 +271,13 @@ model BankStatementLine {
 
   status        BankLineStatus @default(UNMATCHED)
 
+  // Audit trail for IGNORED status (v1.0). Populated when a human
+  // marks the line IGNORED via ignoreLineAction; preserved across
+  // un-ignore so the full history survives. Null for non-IGNORED lines.
+  ignoredAt     DateTime?
+  ignoredBy     String?
+  ignoreReason  String?
+
   matches       ReconciliationMatch[]
   aiSuggestions AiSuggestion[]
 

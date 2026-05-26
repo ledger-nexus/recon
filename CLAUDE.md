@@ -38,12 +38,21 @@ See [`docs/ai-matching.md`](docs/ai-matching.md) for the full pipeline + prompt-
 - ✅ **Adjustment-JE Server Action** (`src/app/actions/post-adjustment.ts`) — for UNMATCHED bank lines that need a new JE (classic case: $50 wire fee never booked). Builds a two-line balanced JE (cash + counter), POSTs via the bridge with `source: "MANUAL"`, creates an APPROVED `ReconciliationMatch` linked to the new entry, flips the bank line to `ADJUSTMENT`.
 - ✅ **Inline adjustment form** on `/statements/[id]` — sits next to "Suggest matches" on UNMATCHED lines. Two inputs (counter-account code + memo), one click to post.
 
-## What's next (v0.3 ideas)
+## What's wired (v1.0 — SHIPPED)
 
-- `AiSuggestion` audit panel UI — cache-hit rate, accept/reject rates per model, cost-per-statement
-- Per-line "Ignore" action
-- Smoke-test automation against a dev DB+API key in CI
+- ✅ **Per-line Ignore / Unignore** — `src/app/actions/ignore-line.ts`. Marks a line IGNORED for non-reconcilable cases (internal transfer, already booked, etc.) with `(ignoredAt, ignoredBy, ignoreReason)` audit columns preserved across un-ignore. Withdraws competing PROPOSED matches; updates statement counters. Reversible via `unignoreLineAction`.
+- ✅ **Bulk "Suggest for all unmatched"** — `proposeAllUnmatchedAction` in `src/app/actions/propose-matches.ts`. Loops over every UNMATCHED line in a statement and runs the deterministic + AI pipeline. Returns aggregate counts (proposed / no-candidates / below-threshold / errors). Sequential by design — Anthropic rate limits matter more than wall-clock speedup for <50-line statements.
+- ✅ **Statement progress summary** at the top of `/statements/[id]` — % resolved + per-status counts + a progress bar. "All resolved" badge appears when 100% of lines are MATCHED / IGNORED / ADJUSTMENT. The bulk button sits inline with the progress card.
+- ✅ **Schema migration** — `bank_statement_line` adds `ignoredAt`, `ignoredBy`, `ignoreReason` columns. Applied via raw SQL through `prisma db execute` (recon's standard pattern since it shares the ledger-core DB).
+- ✅ **Integration tests** — `tests/ignore-line.test.ts` covers the new actions end-to-end: status transitions, counter updates, audit-column preservation, FK cascade, idempotency.
+
+## What's next (v1.1+ ideas)
+
+- `AiSuggestion` audit panel UI — cache-hit rate, accept/reject rates per model, cost-per-statement (SOC 2 CC4 + cost visibility)
+- Smoke-test automation against a dev DB + API key in CI
 - Multi-line adjustments (currently the form only supports a two-line cash+counter JE)
+- Statement-level `RECONCILED` status — once 100% resolved, a "Close statement" action that locks further changes (the current "all resolved" badge is informational only)
+- Bulk-approve / bulk-ignore by description regex
 
 ## Stack
 

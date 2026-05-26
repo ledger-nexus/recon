@@ -15,6 +15,7 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, moneyClass } from "@/lib/utils/format";
 import { LineActions, type ProposalView } from "./line-actions";
+import { StatementBulkActions } from "./bulk-actions";
 
 export default async function StatementDetailPage({
   params,
@@ -60,6 +61,26 @@ export default async function StatementDetailPage({
   );
   const reconciles = sumOfLines.minus(expectedDelta).abs().lessThan(new Decimal("0.01"));
 
+  // Progress summary: count lines by status. Drives the bulk-action
+  // header + the % complete indicator. We count from the in-memory
+  // lines array since the page already fetched them with status.
+  const counts = {
+    unmatched: 0,
+    proposed: 0,
+    matched: 0,
+    ignored: 0,
+    adjustment: 0,
+  };
+  for (const l of statement.lines) {
+    const k = l.status.toLowerCase() as keyof typeof counts;
+    if (k in counts) counts[k] += 1;
+  }
+  const resolvedCount = counts.matched + counts.ignored + counts.adjustment;
+  const totalLines = statement.lines.length;
+  const percentResolved =
+    totalLines === 0 ? 100 : Math.round((resolvedCount / totalLines) * 100);
+  const fullyResolved = totalLines > 0 && resolvedCount === totalLines;
+
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -84,6 +105,70 @@ export default async function StatementDetailPage({
             <Badge tone={reconciles ? "positive" : "negative"}>
               {reconciles ? "Σ = ΔBalance ✓" : "DRIFT"}
             </Badge>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3 px-5 py-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-medium uppercase tracking-wider text-ink-500">
+                  Progress
+                </span>
+                {fullyResolved && (
+                  <Badge tone="positive">All resolved</Badge>
+                )}
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-semibold tabular-nums text-ink-900">
+                  {percentResolved}%
+                </span>
+                <span className="text-xs text-ink-500">
+                  {resolvedCount} of {totalLines} lines resolved
+                </span>
+              </div>
+            </div>
+            <StatementBulkActions
+              statementId={statement.id}
+              unmatchedCount={counts.unmatched}
+            />
+          </div>
+          {/* Progress bar — width driven by percentResolved. */}
+          <div className="h-2 w-full overflow-hidden rounded-full bg-ink-100">
+            <div
+              className={`h-full transition-all ${fullyResolved ? "bg-positive" : "bg-accent-500"}`}
+              style={{ width: `${percentResolved}%` }}
+            />
+          </div>
+          {/* Per-status counts. Hidden when totals are zero to keep noise out. */}
+          <div className="flex flex-wrap gap-3 text-xs text-ink-500">
+            {counts.unmatched > 0 && (
+              <span>
+                <span className="font-medium text-ink-700">{counts.unmatched}</span> unmatched
+              </span>
+            )}
+            {counts.proposed > 0 && (
+              <span>
+                <span className="font-medium text-ink-700">{counts.proposed}</span> proposed
+              </span>
+            )}
+            {counts.matched > 0 && (
+              <span>
+                <span className="font-medium text-ink-700">{counts.matched}</span> matched
+              </span>
+            )}
+            {counts.adjustment > 0 && (
+              <span>
+                <span className="font-medium text-ink-700">{counts.adjustment}</span> adjustment
+              </span>
+            )}
+            {counts.ignored > 0 && (
+              <span>
+                <span className="font-medium text-ink-700">{counts.ignored}</span> ignored
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>
