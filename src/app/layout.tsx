@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Sidebar } from "@/components/nav/sidebar";
+import { isClerkEnabled } from "@/lib/auth/clerk";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -7,8 +8,9 @@ export const metadata: Metadata = {
   description: "AI-assisted bank reconciliation on the ledger-core substrate",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+    const tree = (
+
     <html lang="en">
       <body>
         <div className="grid min-h-screen grid-cols-[260px_1fr] bg-ink-50">
@@ -28,4 +30,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </body>
     </html>
   );
+
+  if (isClerkEnabled()) {
+    const { ClerkProvider } = await import("@clerk/nextjs");
+    return <ClerkProvider>{tree}</ClerkProvider>;
+  }
+  return tree;
 }
