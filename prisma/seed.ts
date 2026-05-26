@@ -16,7 +16,9 @@ const prisma = new PrismaClient();
 async function main() {
   console.log("Recon seed — wiring sample BankAccount + BankStatement...");
 
-  const entity = await prisma.legalEntity.findUnique({
+  // ledger-core Phase 4b: legalEntity.code is unique per [tenantId, code].
+  // recon's mirror dropped the global @unique, so findFirst is required.
+  const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
     select: { id: true },
   });

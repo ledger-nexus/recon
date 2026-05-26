@@ -34,7 +34,11 @@ datasource db {
 
 model LegalEntity {
   id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code                 String   @unique
+  // Phase 4b in ledger-core: code is unique per [tenantId, code], not globally.
+  // recon's mirror doesn't carry tenantId (read-only here), so we just drop
+  // the global @unique. Callers use findFirst — the multi-tenant ambiguity
+  // is now visible at the type level.
+  code                 String
   name                 String
   parentEntityId       String?  @db.Uuid
   functionalCurrencyId String
@@ -128,7 +132,9 @@ model Party {
 
 model JournalEntry {
   id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entryNumber   String   @unique
+  // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
+  // No tenantId in this mirror; drop @unique, callers use findFirst.
+  entryNumber   String
   entityId      String   @db.Uuid
   entity        LegalEntity @relation(fields: [entityId], references: [id])
   bookId        String   @db.Uuid
