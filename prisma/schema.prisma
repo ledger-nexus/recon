@@ -468,13 +468,17 @@ model AiSpendAlert {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId  String   @db.Uuid
   tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Source repo — part of the unique constraint so each repo dedupes
+  /// its own crossings independently. See fa-amort's schema for the
+  /// full rationale.
+  source    String
   monthKey  String
   threshold Int
   capUsd    Decimal  @db.Decimal(10, 2)
   spentUsd  Decimal  @db.Decimal(10, 2)
   sentAt    DateTime @default(now())
 
-  @@unique([tenantId, monthKey, threshold])
+  @@unique([tenantId, source, monthKey, threshold])
   @@index([tenantId, sentAt])
   @@map("ai_spend_alert")
 }

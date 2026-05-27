@@ -154,6 +154,7 @@ export async function emitSpendAlertIfThresholdCrossed(
         await prisma.aiSpendAlert.create({
           data: {
             tenantId,
+            source: REPO_NAME,
             monthKey,
             threshold,
             capUsd: capUsd.toFixed(2),
