@@ -84,6 +84,16 @@ async function checkRateLimits(tenantId: string, userId: string): Promise<void> 
 }
 
 async function checkMonthlySpendCap(tenantId: string): Promise<void> {
+  const { spentUsd, capUsd } = await computeMonthlySpend(tenantId);
+  if (spentUsd.greaterThanOrEqualTo(capUsd)) {
+    throw new MonthlySpendCapExceededError(spentUsd, capUsd);
+  }
+}
+
+async function computeMonthlySpend(tenantId: string): Promise<{
+  spentUsd: Decimal;
+  capUsd: Decimal;
+}> {
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { monthlyAiSpendCapUsd: true },
@@ -107,12 +117,120 @@ async function checkMonthlySpendCap(tenantId: string): Promise<void> {
     spentUsd = spentUsd.plus(inputCost).plus(outputCost);
   }
 
-  if (spentUsd.greaterThanOrEqualTo(capUsd)) {
-    throw new MonthlySpendCapExceededError(spentUsd, capUsd);
-  }
+  return { spentUsd, capUsd };
 }
 
 function startOfCurrentMonthUtc(): Date {
   const now = new Date();
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+function currentMonthKey(): string {
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${yyyy}-${mm}`;
+}
+
+// ─── Spend-threshold alerts ──────────────────────────────────────────────
+// Mirror of fa-amort/src/lib/auth/ai-budget.ts. See that file for the
+// full design rationale.
+
+const THRESHOLDS = [80, 100] as const;
+const REPO_NAME = "recon";
+
+export async function emitSpendAlertIfThresholdCrossed(
+  tenantId: string
+): Promise<void> {
+  try {
+    const { spentUsd, capUsd } = await computeMonthlySpend(tenantId);
+    if (capUsd.lessThanOrEqualTo(0)) return;
+    const pctOfCap = spentUsd.div(capUsd).mul(100);
+    const monthKey = currentMonthKey();
+
+    for (const threshold of THRESHOLDS) {
+      if (pctOfCap.lessThan(threshold)) continue;
+      try {
+        await prisma.aiSpendAlert.create({
+          data: {
+            tenantId,
+            monthKey,
+            threshold,
+            capUsd: capUsd.toFixed(2),
+            spentUsd: spentUsd.toFixed(2),
+          },
+        });
+      } catch (e) {
+        if (isUniqueViolation(e)) continue;
+        throw e;
+      }
+      const message = formatAlertMessage({
+        tenantId,
+        monthKey,
+        threshold,
+        capUsd,
+        spentUsd,
+      });
+      console.warn(`[ai-spend-alert] ${message}`);
+      await postWebhookBestEffort(message, {
+        tenantId,
+        monthKey,
+        threshold,
+        capUsd: capUsd.toFixed(2),
+        spentUsd: spentUsd.toFixed(2),
+        source: REPO_NAME,
+      });
+    }
+  } catch (e) {
+    console.error("[ai-spend-alert] failed to evaluate thresholds", e);
+  }
+}
+
+function formatAlertMessage(args: {
+  tenantId: string;
+  monthKey: string;
+  threshold: number;
+  capUsd: Decimal;
+  spentUsd: Decimal;
+}): string {
+  const verb = args.threshold >= 100 ? "REACHED" : "approaching";
+  return (
+    `[${REPO_NAME}] Tenant ${args.tenantId} ${verb} ${args.threshold}% ` +
+    `of the Anthropic spend cap for ${args.monthKey} — ` +
+    `$${args.spentUsd.toFixed(2)} of $${args.capUsd.toFixed(2)}.`
+  );
+}
+
+async function postWebhookBestEffort(
+  text: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  const url = process.env.AI_ALERT_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, ...payload }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      console.error(
+        `[ai-spend-alert] webhook returned ${res.status}: ${await res
+          .text()
+          .catch(() => "<unreadable>")}`
+      );
+    }
+  } catch (e) {
+    console.error("[ai-spend-alert] webhook POST failed", e);
+  }
+}
+
+function isUniqueViolation(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const code = (e as { code?: string }).code;
+  return code === "P2002";
 }

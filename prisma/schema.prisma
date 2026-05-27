@@ -456,8 +456,27 @@ model Tenant {
   memberships          TenantMembership[]
   aiSuggestions        AiSuggestion[]
   rateLimitEvents      RateLimitEvent[]
+  aiSpendAlerts        AiSpendAlert[]
 
   @@map("tenant")
+}
+
+/// Spend-threshold alerts. See src/lib/auth/ai-budget.ts. Mirror of
+/// fa-amort + revenue-rec's table; recon tracks its own Haiku match
+/// spend independently.
+model AiSpendAlert {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  monthKey  String
+  threshold Int
+  capUsd    Decimal  @db.Decimal(10, 2)
+  spentUsd  Decimal  @db.Decimal(10, 2)
+  sentAt    DateTime @default(now())
+
+  @@unique([tenantId, monthKey, threshold])
+  @@index([tenantId, sentAt])
+  @@map("ai_spend_alert")
 }
 
 /// Per-action rate-limit ledger. See src/lib/auth/ai-budget.ts.

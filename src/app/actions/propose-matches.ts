@@ -37,6 +37,7 @@ import {
 } from "@/lib/auth/session";
 import {
   enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
@@ -161,6 +162,11 @@ export async function proposeMatchesAction(
           latencyMs: aiResult.latencyMs,
         },
       });
+      // Evaluate spend-threshold alerts after the just-finished call is
+      // included in the tally. In the bulk action this fires once per
+      // line — but the helper's per-month dedup row keeps that to at
+      // most one alert delivery per threshold per calendar month.
+      await emitSpendAlertIfThresholdCrossed(tenant.id);
     }
 
     // Assemble proposals. Deterministic top always wins a slot if its
