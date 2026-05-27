@@ -37,21 +37,13 @@ interface AiCandidateJson {
 }
 
 export default async function AiAuditPage() {
-  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
-  // Without this filter, the panel would surface every tenant's AI runs
-  // along with bank-line descriptions (merchant names, transfer memos)
-  // and amounts.
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope via the
+  // tenantId column added to AiSuggestion. Legacy rows (created
+  // before the column was added) have null tenantId and are filtered
+  // out — backfill via prisma/backfill-ai-suggestion-tenant.sql.
   const tenant = await getCurrentTenant();
   const suggestions = await prisma.aiSuggestion.findMany({
-    where: tenant
-      ? {
-          bankLine: {
-            statement: {
-              bankAccount: { entity: { tenantId: tenant.id } },
-            },
-          },
-        }
-      : { id: "__none__" },
+    where: tenant ? { tenantId: tenant.id } : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 200,
     select: {

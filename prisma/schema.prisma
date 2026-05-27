@@ -357,6 +357,15 @@ model AiSuggestion {
   bankLineId      String @db.Uuid
   bankLine        BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
 
+  // SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  // row so the audit page can filter without joining through
+  // bankLine.statement.bankAccount.entity. Nullable because legacy rows
+  // (created before this column was added) don't have a value; the page
+  // queries filter null rows out — they're treated as untrusted/legacy.
+  // Backfill SQL lives in prisma/backfill-ai-suggestion-tenant.sql.
+  tenantId        String? @db.Uuid
+  tenant          Tenant? @relation(fields: [tenantId], references: [id])
+
   // Candidates as a JSON array of { journalLineId, confidence, rationale }
   // in descending confidence order. Stored as JSON because the shape may
   // evolve as the prompt evolves.
@@ -371,6 +380,7 @@ model AiSuggestion {
   createdAt DateTime @default(now())
 
   @@index([bankLineId])
+  @@index([tenantId, createdAt])
   @@map("ai_suggestion")
 }
 
@@ -437,10 +447,11 @@ model User {
 }
 
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id            String  @id @db.Uuid
+  slug          String  @unique
+  name          String
+  memberships   TenantMembership[]
+  aiSuggestions AiSuggestion[]
 
   @@map("tenant")
 }

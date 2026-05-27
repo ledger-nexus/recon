@@ -29,6 +29,12 @@ import {
   getAiMatchSuggestions,
   type AiSuggestionResult,
 } from "@/lib/matching/ai-suggest";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 // Below this AI-confidence, we still log the suggestion but don't create
 // a PROPOSED match row — too noisy for the human approval queue.
@@ -51,8 +57,18 @@ export async function proposeMatchesAction(
   bankLineId: string
 ): Promise<ProposeMatchesState> {
   try {
-    const bankLine = await prisma.bankStatementLine.findUnique({
-      where: { id: bankLineId },
+    // SECURITY (pen-test pass 4 follow-up): require auth + tenant. This
+    // action calls the Anthropic API (per-tenant cost) and writes an
+    // audit row, so anonymous callers must be refused. Tenant-scoping
+    // the bankLine lookup prevents cross-tenant AI invocations.
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    const bankLine = await prisma.bankStatementLine.findFirst({
+      where: {
+        id: bankLineId,
+        statement: { bankAccount: { entity: { tenantId: tenant.id } } },
+      },
       select: {
         id: true,
         amount: true,
@@ -116,6 +132,7 @@ export async function proposeMatchesAction(
       await prisma.aiSuggestion.create({
         data: {
           bankLineId,
+          tenantId: tenant.id,
           candidatesJson: aiResult.candidates as unknown as object,
           modelName: aiResult.modelName,
           promptHash: aiResult.promptHash || null,
@@ -225,6 +242,10 @@ export async function proposeMatchesAction(
         : undefined,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in.", bankLineId };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message, bankLineId };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error",
@@ -260,8 +281,19 @@ export async function proposeAllUnmatchedAction(
   statementId: string
 ): Promise<ProposeAllState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): same gate as
+    // proposeMatchesAction. The per-line invocation inside the loop
+    // also re-checks, but failing fast here saves a DB query when the
+    // caller isn't authorized.
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
     const lines = await prisma.bankStatementLine.findMany({
-      where: { statementId, status: "UNMATCHED" },
+      where: {
+        statementId,
+        status: "UNMATCHED",
+        statement: { bankAccount: { entity: { tenantId: tenant.id } } },
+      },
       select: { id: true },
       orderBy: { lineNo: "asc" },
     });
@@ -320,6 +352,10 @@ export async function proposeAllUnmatchedAction(
       errors,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error",
