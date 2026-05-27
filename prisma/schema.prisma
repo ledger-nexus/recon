@@ -499,13 +499,27 @@ model RateLimitEvent {
 }
 
 model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  /// Mirror of ledger-core's TenantRole enum. Hierarchy:
+  /// OWNER > ADMIN > MEMBER > VIEWER. See src/lib/auth/policy.ts
+  /// for the permission catalog.
+  role     TenantRole @default(MEMBER)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   user   User   @relation(fields: [userId], references: [id])
 
   @@unique([tenantId, userId])
   @@map("tenant_membership")
+}
+
+/// Mirror of ledger-core's TenantRole enum. Must stay in sync —
+/// ledger-core's schema is the canonical source. New roles added
+/// upstream must be added here too BEFORE the column-type change
+/// can land.
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
 }

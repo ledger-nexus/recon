@@ -28,6 +28,7 @@
 // to set up Clerk before they can touch the write surface.
 
 import { prisma } from "@/lib/db";
+import type { TenantRole } from "@prisma/client";
 
 export interface CurrentUser {
   /** The user's id in the shared app_user table. */
@@ -40,7 +41,8 @@ export interface CurrentTenant {
   id: string;
   slug: string;
   name: string;
-  role: string;
+  /** Role of the current user in this tenant. See src/lib/auth/policy.ts. */
+  role: TenantRole;
 }
 
 export class NotAuthenticatedError extends Error {
