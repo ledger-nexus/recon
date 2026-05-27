@@ -447,13 +447,32 @@ model User {
 }
 
 model Tenant {
-  id            String  @id @db.Uuid
-  slug          String  @unique
-  name          String
-  memberships   TenantMembership[]
-  aiSuggestions AiSuggestion[]
+  id                   String             @id @db.Uuid
+  slug                 String             @unique
+  name                 String
+  /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
+  /// recon never writes this column.
+  monthlyAiSpendCapUsd Decimal?           @db.Decimal(10, 2)
+  memberships          TenantMembership[]
+  aiSuggestions        AiSuggestion[]
+  rateLimitEvents      RateLimitEvent[]
 
   @@map("tenant")
+}
+
+/// Per-action rate-limit ledger. See src/lib/auth/ai-budget.ts.
+/// Mirrors fa-amort + revenue-rec; shared concept, per-repo table.
+model RateLimitEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  userId    String?  @db.Uuid
+  action    String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("rate_limit_event")
 }
 
 model TenantMembership {
