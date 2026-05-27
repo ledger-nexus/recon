@@ -7,9 +7,17 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function StatementsPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this filter, the list would surface every tenant's bank
+  // statements with bank account name + balance information.
+  const tenant = await getCurrentTenant();
   const statements = await prisma.bankStatement.findMany({
+    where: tenant
+      ? { bankAccount: { entity: { tenantId: tenant.id } } }
+      : { id: "__none__" },
     orderBy: { uploadedAt: "desc" },
     include: { bankAccount: { select: { displayName: true, code: true } } },
   });

@@ -24,6 +24,7 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 // Haiku 4.5 list pricing per Anthropic ($/1M tokens).
 const HAIKU_INPUT_PER_M = 1.0;
@@ -36,7 +37,21 @@ interface AiCandidateJson {
 }
 
 export default async function AiAuditPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this filter, the panel would surface every tenant's AI runs
+  // along with bank-line descriptions (merchant names, transfer memos)
+  // and amounts.
+  const tenant = await getCurrentTenant();
   const suggestions = await prisma.aiSuggestion.findMany({
+    where: tenant
+      ? {
+          bankLine: {
+            statement: {
+              bankAccount: { entity: { tenantId: tenant.id } },
+            },
+          },
+        }
+      : { id: "__none__" },
     orderBy: { createdAt: "desc" },
     take: 200,
     select: {

@@ -16,14 +16,22 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, moneyClass } from "@/lib/utils/format";
 import { LineActions, type ProposalView } from "./line-actions";
 import { StatementBulkActions } from "./bulk-actions";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function StatementDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const statement = await prisma.bankStatement.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read.
+  // Without this, a signed-in user could navigate to /statements/[any-id]
+  // and read every bank line on another tenant's statement — including
+  // descriptions (merchant names, transfer memos) and amounts. The page
+  // also embeds the full rawPayload via the bank statement record.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const statement = await prisma.bankStatement.findFirst({
+    where: { id: params.id, bankAccount: { entity: { tenantId: tenant.id } } },
     include: {
       bankAccount: { select: { displayName: true, code: true } },
       lines: {
