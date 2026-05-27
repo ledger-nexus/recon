@@ -10,24 +10,43 @@
 //     match remains on the bank line, the line returns to UNMATCHED so
 //     it's still visible in the human queue.
 //
-// Neither action writes to ledger-core. Adjustment-JE posting (the path
-// that calls into ledger-core's postJournalEntry) ships in v0.2-beta.
+// SECURITY (pen-test pass 4): both actions require a signed-in user
+// and tenant-scope the match lookup via match → bankLine → statement
+// → bankAccount → entity → tenantId. Without this gate, a signed-in
+// user from tenant A could approve/reject tenant B's matches by
+// supplying a foreign UUID. The approvedBy / rejectedBy fields are
+// now stamped from the authenticated user, not caller-supplied input.
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 export interface DecideMatchState {
   ok: boolean;
   message: string;
 }
 
+const tenantWhereFor = (tenantId: string) => ({
+  bankLine: { statement: { bankAccount: { entity: { tenantId } } } },
+});
+
 export async function approveMatchAction(
   matchId: string,
-  approvedBy?: string
+  // approvedBy retained as a parameter for backward-compat but no longer
+  // trusted as identity — the authenticated user's email is stamped.
+  _approvedBy?: string
 ): Promise<DecideMatchState> {
   try {
-    const match = await prisma.reconciliationMatch.findUnique({
-      where: { id: matchId },
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    const match = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId, ...tenantWhereFor(tenant.id) },
       select: {
         id: true,
         status: true,
@@ -35,7 +54,7 @@ export async function approveMatchAction(
         bankLine: { select: { statementId: true } },
       },
     });
-    if (!match) return { ok: false, message: "Match not found" };
+    if (!match) return { ok: false, message: "Match not found in this tenant" };
     if (match.status !== "PROPOSED") {
       return { ok: false, message: `Match is ${match.status}, not PROPOSED` };
     }
@@ -46,7 +65,7 @@ export async function approveMatchAction(
         data: {
           status: "APPROVED",
           approvedAt: new Date(),
-          approvedBy: approvedBy ?? null,
+          approvedBy: user.email,
         },
       });
       // Withdraw competing PROPOSED matches on the same bank line.
@@ -75,17 +94,24 @@ export async function approveMatchAction(
     revalidatePath(`/statements/${match.bankLine.statementId}`);
     return { ok: true, message: "Match approved." };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }
 
 export async function rejectMatchAction(
   matchId: string,
-  rejectedBy?: string
+  _rejectedBy?: string
 ): Promise<DecideMatchState> {
   try {
-    const match = await prisma.reconciliationMatch.findUnique({
-      where: { id: matchId },
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    const match = await prisma.reconciliationMatch.findFirst({
+      where: { id: matchId, ...tenantWhereFor(tenant.id) },
       select: {
         id: true,
         status: true,
@@ -93,7 +119,7 @@ export async function rejectMatchAction(
         bankLine: { select: { statementId: true } },
       },
     });
-    if (!match) return { ok: false, message: "Match not found" };
+    if (!match) return { ok: false, message: "Match not found in this tenant" };
     if (match.status !== "PROPOSED") {
       return { ok: false, message: `Match is ${match.status}, not PROPOSED` };
     }
@@ -104,7 +130,7 @@ export async function rejectMatchAction(
         data: {
           status: "REJECTED",
           rejectedAt: new Date(),
-          rejectedBy: rejectedBy ?? null,
+          rejectedBy: user.email,
         },
       });
       // If no PROPOSED matches remain on this bank line, fall back to
@@ -123,6 +149,10 @@ export async function rejectMatchAction(
     revalidatePath(`/statements/${match.bankLine.statementId}`);
     return { ok: true, message: "Match rejected." };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }

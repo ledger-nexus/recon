@@ -15,6 +15,26 @@ vi.mock("next/cache", () => ({
   revalidatePath: () => {},
 }));
 
+// Mock the tenant-aware session helpers. After pen-test pass 4, every
+// Server Action requires a signed-in user + active tenant. In tests we
+// short-circuit to the default tenant (the seed creates it).
+vi.mock("@/lib/auth/session", () => ({
+  requireCurrentUser: async () => ({
+    id: "00000000-0000-0000-0000-000000000000",
+    email: "test@example.test",
+    displayName: "Test",
+  }),
+  requireCurrentTenant: async () => {
+    const { PrismaClient } = await import("@prisma/client");
+    const p = new PrismaClient();
+    const t = await p.tenant.findFirstOrThrow({ where: { slug: "default" } });
+    await p.$disconnect();
+    return { id: t.id, slug: t.slug, name: t.name, role: "OWNER" };
+  },
+  NotAuthenticatedError: class NotAuthenticatedError extends Error {},
+  NoTenantSelectedError: class NoTenantSelectedError extends Error {},
+}));
+
 import { PrismaClient } from "@prisma/client";
 import {
   ignoreLineAction,
@@ -134,7 +154,7 @@ describe("ignoreLineAction", () => {
     });
     expect(updated.status).toBe("IGNORED");
     expect(updated.ignoredAt).not.toBeNull();
-    expect(updated.ignoredBy).toBe("test-user");
+    expect(updated.ignoredBy).toBe("test@example.test"); // stamped from authenticated user
     expect(updated.ignoreReason).toBe("Internal transfer between own accounts");
 
     const after = await prisma.bankStatement.findUniqueOrThrow({
@@ -223,7 +243,7 @@ describe("unignoreLineAction", () => {
     expect(updated.status).toBe("UNMATCHED");
     // Audit columns deliberately preserved — auditors see the full history.
     expect(updated.ignoredAt).not.toBeNull();
-    expect(updated.ignoredBy).toBe("test-user");
+    expect(updated.ignoredBy).toBe("test@example.test"); // stamped from authenticated user
 
     const after = await prisma.bankStatement.findUniqueOrThrow({
       where: { id: statementId },

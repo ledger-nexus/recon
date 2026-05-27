@@ -50,7 +50,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { Decimal } from "decimal.js";
+import { timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/db";
+
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return false;
+  }
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,8 +104,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       503
     );
   }
+  // SECURITY (pen-test pass 4): constant-time token comparison.
+  // `!==` short-circuits on the first byte mismatch, leaking how many
+  // leading characters of the token were correct via response timing.
   const authHeader = req.headers.get("authorization") ?? "";
-  if (authHeader !== `Bearer ${token}`) {
+  const expected = `Bearer ${token}`;
+  if (!constantTimeEquals(authHeader, expected)) {
     return err("UNAUTHORIZED", "Invalid or missing bearer token", 401);
   }
 

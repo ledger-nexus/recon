@@ -18,11 +18,26 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/db";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 export interface IgnoreLineState {
   ok: boolean;
   message: string;
 }
+
+// SECURITY (pen-test pass 4): ignore/unignore both authenticate and
+// tenant-scope the bank-line lookup via the chain bankLine → statement
+// → bankAccount → entity → tenantId. Previously any signed-in user
+// could ignore foreign-tenant lines.
+
+const tenantWhereFor = (tenantId: string) => ({
+  statement: { bankAccount: { entity: { tenantId } } },
+});
 
 /**
  * Mark an UNMATCHED bank line as IGNORED. Reversible via unignoreLineAction.
@@ -36,11 +51,13 @@ export async function ignoreLineAction(input: {
   ignoredBy?: string;
 }): Promise<IgnoreLineState> {
   try {
-    const line = await prisma.bankStatementLine.findUnique({
-      where: { id: input.bankLineId },
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    const line = await prisma.bankStatementLine.findFirst({
+      where: { id: input.bankLineId, ...tenantWhereFor(tenant.id) },
       select: { id: true, status: true, statementId: true },
     });
-    if (!line) return { ok: false, message: "Bank line not found" };
+    if (!line) return { ok: false, message: "Bank line not found in this tenant" };
     if (line.status === "IGNORED") {
       return { ok: true, message: "Line already IGNORED." };
     }
@@ -65,7 +82,10 @@ export async function ignoreLineAction(input: {
         data: {
           status: "IGNORED",
           ignoredAt: new Date(),
-          ignoredBy: input.ignoredBy ?? null,
+          // ignoredBy stamped from the authenticated user, ignoring
+          // caller-supplied input.ignoredBy (kept as a parameter for
+          // backward compat but no longer trusted as identity).
+          ignoredBy: user.email,
           ignoreReason: input.reason?.trim() || null,
         },
       });
@@ -84,6 +104,10 @@ export async function ignoreLineAction(input: {
     revalidatePath(`/statements/${line.statementId}`);
     return { ok: true, message: "Line marked IGNORED." };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }
@@ -96,11 +120,13 @@ export async function unignoreLineAction(
   bankLineId: string
 ): Promise<IgnoreLineState> {
   try {
-    const line = await prisma.bankStatementLine.findUnique({
-      where: { id: bankLineId },
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    const line = await prisma.bankStatementLine.findFirst({
+      where: { id: bankLineId, ...tenantWhereFor(tenant.id) },
       select: { id: true, status: true, statementId: true },
     });
-    if (!line) return { ok: false, message: "Bank line not found" };
+    if (!line) return { ok: false, message: "Bank line not found in this tenant" };
     if (line.status !== "IGNORED") {
       return { ok: false, message: `Line is ${line.status}, not IGNORED.` };
     }
@@ -121,6 +147,10 @@ export async function unignoreLineAction(
     revalidatePath(`/statements/${line.statementId}`);
     return { ok: true, message: "Line restored to UNMATCHED." };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }

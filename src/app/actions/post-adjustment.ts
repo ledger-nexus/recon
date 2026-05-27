@@ -30,6 +30,12 @@ import {
   friendlyLedgerError,
   type LedgerJournalEntryInput,
 } from "@/lib/ledger-bridge";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
 
 export interface PostAdjustmentInput {
   bankLineId: string;
@@ -50,8 +56,22 @@ export async function postAdjustmentAction(
   input: PostAdjustmentInput
 ): Promise<PostAdjustmentState> {
   try {
-    const bankLine = await prisma.bankStatementLine.findUnique({
-      where: { id: input.bankLineId },
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    // SECURITY (pen-test pass 4): tenant-scope the bank-line lookup via
+    // bankAccount.entity.tenantId. Before this gate, any signed-in
+    // user could pass a foreign tenant's bankLineId and post a JE
+    // against that tenant's books — the most severe finding in this
+    // repo because postEntryViaLedgerCore goes all the way through to
+    // a real journal entry.
+    const bankLine = await prisma.bankStatementLine.findFirst({
+      where: {
+        id: input.bankLineId,
+        statement: {
+          bankAccount: { entity: { tenantId: tenant.id } },
+        },
+      },
       select: {
         id: true,
         amount: true,
@@ -71,7 +91,7 @@ export async function postAdjustmentAction(
         },
       },
     });
-    if (!bankLine) return { ok: false, message: "Bank line not found" };
+    if (!bankLine) return { ok: false, message: "Bank line not found in this tenant" };
     if (bankLine.status === "MATCHED" || bankLine.status === "ADJUSTMENT") {
       return {
         ok: false,
@@ -138,7 +158,10 @@ export async function postAdjustmentAction(
           status: "APPROVED",
           appliedByEntryId: posted.id,
           approvedAt: new Date(),
-          approvedBy: input.postedBy ?? null,
+          // Stamp the authenticated user, ignoring caller-supplied
+          // postedBy (which is now informational only / kept for the
+          // public API but no longer trusted as identity).
+          approvedBy: user.email,
         },
       });
       // Withdraw any sibling PROPOSED matches on this bank line.
@@ -169,6 +192,12 @@ export async function postAdjustmentAction(
       entryNumber: posted.entryNumber,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError) {
+      return { ok: false, message: "You must be signed in to post an adjustment." };
+    }
+    if (e instanceof NoTenantSelectedError) {
+      return { ok: false, message: e.message };
+    }
     if (e instanceof LedgerCoreError) {
       return { ok: false, message: friendlyLedgerError(e) };
     }

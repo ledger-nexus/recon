@@ -35,9 +35,10 @@ datasource db {
 model LegalEntity {
   id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Phase 4b in ledger-core: code is unique per [tenantId, code], not globally.
-  // recon's mirror doesn't carry tenantId (read-only here), so we just drop
-  // the global @unique. Callers use findFirst — the multi-tenant ambiguity
-  // is now visible at the type level.
+  // SECURITY (pen-test pass 4): tenantId added so Server Actions can
+  // tenant-scope their record lookups. The column exists in the shared
+  // DB; declaring it here lets recon's Prisma client filter by it.
+  tenantId             String   @db.Uuid
   code                 String
   name                 String
   parentEntityId       String?  @db.Uuid
@@ -414,4 +415,44 @@ enum EntryStatus {
   POSTED
   VOID
   REVERSED
+}
+
+// ─── Shared multi-tenancy tables ────────────────────────────────────────
+//
+// SECURITY (pen-test pass 4): these tables live in the shared DB (owned
+// by ledger-core's schema). recon needs read access to them to resolve
+// the current Clerk-authenticated user → their TenantMembership → the
+// current tenant for Server Action scoping. We declare just enough
+// columns to make typed Prisma queries; we never write to them from
+// recon. The tables already exist in the DB; no migration needed.
+
+model User {
+  id          String  @id @db.Uuid
+  email       String  @unique
+  displayName String
+  isActive    Boolean @default(true)
+  memberships TenantMembership[]
+
+  @@map("app_user")
+}
+
+model Tenant {
+  id          String  @id @db.Uuid
+  slug        String  @unique
+  name        String
+  memberships TenantMembership[]
+
+  @@map("tenant")
+}
+
+model TenantMembership {
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  role     String
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([tenantId, userId])
+  @@map("tenant_membership")
 }
