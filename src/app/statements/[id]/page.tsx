@@ -174,6 +174,7 @@ export default async function StatementDetailPage({
                 <StatementBulkActions
                   statementId={statement.id}
                   unmatchedCount={counts.unmatched}
+                  proposedCount={counts.proposed}
                 />
               )}
             </div>
