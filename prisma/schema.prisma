@@ -453,6 +453,13 @@ model Tenant {
   /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
   /// recon never writes this column.
   monthlyAiSpendCapUsd Decimal?           @db.Decimal(10, 2)
+  /// Mirror of ledger-core's Tenant.billingPlan. Read-only.
+  /// recon's session.requireRepoAccess() reads this to gate access by plan.
+  billingPlan          String?
+  /// Mirror of ledger-core's Tenant.subscriptionStatus.
+  /// "active" / "trialing" → use billingPlan; everything else falls
+  /// back to free tier.
+  subscriptionStatus   String?
   memberships          TenantMembership[]
   aiSuggestions        AiSuggestion[]
   rateLimitEvents      RateLimitEvent[]
