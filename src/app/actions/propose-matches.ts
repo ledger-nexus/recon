@@ -41,6 +41,11 @@ import {
   RateLimitExceededError,
   MonthlySpendCapExceededError,
 } from "@/lib/auth/ai-budget";
+import {
+  assertStatementOpen,
+  StatementReconciledError,
+  StatementNotFoundError,
+} from "@/lib/statement-lock";
 
 // Below this AI-confidence, we still log the suggestion but don't create
 // a PROPOSED match row — too noisy for the human approval queue.
@@ -69,6 +74,9 @@ export async function proposeMatchesAction(
     // the bankLine lookup prevents cross-tenant AI invocations.
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+
+    // Refuse if the statement is RECONCILED (admin must reopen first).
+    await assertStatementOpen(prisma, { tenantId: tenant.id, bankLineId });
 
     const bankLine = await prisma.bankStatementLine.findFirst({
       where: {
@@ -274,6 +282,8 @@ export async function proposeMatchesAction(
       return { ok: false, message: e.message, bankLineId };
     if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
       return { ok: false, message: e.message, bankLineId };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
+      return { ok: false, message: e.message, bankLineId };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error",
@@ -315,6 +325,9 @@ export async function proposeAllUnmatchedAction(
     // caller isn't authorized.
     await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    // Refuse if the statement is RECONCILED — same gate as the
+    // single-line action.
+    await assertStatementOpen(prisma, { tenantId: tenant.id, statementId });
 
     const lines = await prisma.bankStatementLine.findMany({
       where: {
@@ -396,6 +409,8 @@ export async function proposeAllUnmatchedAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
       return { ok: false, message: e.message };
     return {
       ok: false,

@@ -24,6 +24,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  assertStatementOpen,
+  StatementReconciledError,
+  StatementNotFoundError,
+} from "@/lib/statement-lock";
 
 export interface IgnoreLineState {
   ok: boolean;
@@ -53,6 +58,7 @@ export async function ignoreLineAction(input: {
   try {
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    await assertStatementOpen(prisma, { tenantId: tenant.id, bankLineId: input.bankLineId });
     const line = await prisma.bankStatementLine.findFirst({
       where: { id: input.bankLineId, ...tenantWhereFor(tenant.id) },
       select: { id: true, status: true, statementId: true },
@@ -108,6 +114,8 @@ export async function ignoreLineAction(input: {
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }
@@ -122,6 +130,7 @@ export async function unignoreLineAction(
   try {
     await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+    await assertStatementOpen(prisma, { tenantId: tenant.id, bankLineId });
     const line = await prisma.bankStatementLine.findFirst({
       where: { id: bankLineId, ...tenantWhereFor(tenant.id) },
       select: { id: true, status: true, statementId: true },
@@ -150,6 +159,8 @@ export async function unignoreLineAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
       return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }

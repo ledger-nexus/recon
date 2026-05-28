@@ -36,6 +36,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  assertStatementOpen,
+  StatementReconciledError,
+  StatementNotFoundError,
+} from "@/lib/statement-lock";
 
 export interface PostAdjustmentInput {
   bankLineId: string;
@@ -58,6 +63,13 @@ export async function postAdjustmentAction(
   try {
     const user = await requireCurrentUser();
     const tenant = await requireCurrentTenant();
+
+    // Refuse if the parent statement is RECONCILED. Same gate as every
+    // other mutating recon action.
+    await assertStatementOpen(prisma, {
+      tenantId: tenant.id,
+      bankLineId: input.bankLineId,
+    });
 
     // SECURITY (pen-test pass 4): tenant-scope the bank-line lookup via
     // bankAccount.entity.tenantId. Before this gate, any signed-in
@@ -196,6 +208,9 @@ export async function postAdjustmentAction(
       return { ok: false, message: "You must be signed in to post an adjustment." };
     }
     if (e instanceof NoTenantSelectedError) {
+      return { ok: false, message: e.message };
+    }
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError) {
       return { ok: false, message: e.message };
     }
     if (e instanceof LedgerCoreError) {

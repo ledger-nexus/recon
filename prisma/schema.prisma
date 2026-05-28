@@ -256,8 +256,29 @@ model BankStatement {
   matchedLines      Int @default(0)
   pendingLines      Int @default(0)
 
+  // ─── Statement-level lock (v1.1) ──────────────────────────────────
+  //
+  // OPEN       — default; mutations (propose / decide / ignore /
+  //              adjustment) are accepted normally
+  // RECONCILED — frozen; all mutating actions refuse until an admin
+  //              reopens. Set by reconcileStatementAction once 100% of
+  //              the lines resolve (matched + ignored + adjustment).
+  //
+  // reconciledAt + reconciledBy are stamped on the transition.
+  // Reopening clears them so a re-locked statement reflects the
+  // latest run, not the original.
+  status        BankStatementStatus @default(OPEN)
+  reconciledAt  DateTime?
+  reconciledBy  String? // user email/displayName at reconcile time
+
   @@index([bankAccountId, periodEnd])
+  @@index([bankAccountId, status])
   @@map("bank_statement")
+}
+
+enum BankStatementStatus {
+  OPEN
+  RECONCILED
 }
 
 model BankStatementLine {

@@ -25,6 +25,11 @@ import {
   NotAuthenticatedError,
   NoTenantSelectedError,
 } from "@/lib/auth/session";
+import {
+  assertStatementOpen,
+  StatementReconciledError,
+  StatementNotFoundError,
+} from "@/lib/statement-lock";
 
 export interface DecideMatchState {
   ok: boolean;
@@ -58,6 +63,11 @@ export async function approveMatchAction(
     if (match.status !== "PROPOSED") {
       return { ok: false, message: `Match is ${match.status}, not PROPOSED` };
     }
+    // Refuse if the parent statement is RECONCILED.
+    await assertStatementOpen(prisma, {
+      tenantId: tenant.id,
+      statementId: match.bankLine.statementId,
+    });
 
     await prisma.$transaction(async (tx) => {
       await tx.reconciliationMatch.update({
@@ -98,6 +108,8 @@ export async function approveMatchAction(
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
       return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
+      return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
 }
@@ -123,6 +135,11 @@ export async function rejectMatchAction(
     if (match.status !== "PROPOSED") {
       return { ok: false, message: `Match is ${match.status}, not PROPOSED` };
     }
+    // Refuse if the parent statement is RECONCILED.
+    await assertStatementOpen(prisma, {
+      tenantId: tenant.id,
+      statementId: match.bankLine.statementId,
+    });
 
     await prisma.$transaction(async (tx) => {
       await tx.reconciliationMatch.update({
@@ -152,6 +169,8 @@ export async function rejectMatchAction(
     if (e instanceof NotAuthenticatedError)
       return { ok: false, message: "You must be signed in." };
     if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
       return { ok: false, message: e.message };
     return { ok: false, message: e instanceof Error ? e.message : "Unknown error" };
   }
