@@ -35,7 +35,15 @@ export default async function StatementDetailPage({
   const statement = await prisma.bankStatement.findFirst({
     where: { id: params.id, bankAccount: { entity: { tenantId: tenant.id } } },
     include: {
-      bankAccount: { select: { displayName: true, code: true } },
+      bankAccount: {
+        select: {
+          displayName: true,
+          code: true,
+          // The cash GL account code is needed by the multi-line
+          // adjustment editor to render its fixed "Cash" row.
+          account: { select: { code: true } },
+        },
+      },
       lines: {
         orderBy: { lineNo: "asc" },
         include: {
@@ -285,6 +293,8 @@ export default async function StatementDetailPage({
                         bankLineId={line.id}
                         status={line.status}
                         proposals={proposals.filter((p) => p.source !== "MANUAL" || line.status === "PROPOSED")}
+                        bankLineAmount={line.amount.toString()}
+                        cashAccountCode={statement.bankAccount.account.code}
                       />
                     </TD>
                   </TR>
