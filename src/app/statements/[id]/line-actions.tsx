@@ -35,7 +35,7 @@ export interface ProposalView {
 
 interface Props {
   bankLineId: string;
-  status: "UNMATCHED" | "PROPOSED" | "MATCHED" | "IGNORED" | "ADJUSTMENT";
+  status: "UNMATCHED" | "PROPOSED" | "MATCHED" | "IGNORED" | "ADJUSTMENT" | "VOID";
   proposals: ProposalView[];
   /** Signed bank-line amount as a string (positive = deposit, negative = withdrawal). */
   bankLineAmount: string;
@@ -219,6 +219,14 @@ export function LineActions({
   }
   if (status === "ADJUSTMENT") {
     return <span className="text-xs text-ink-400">adjustment posted</span>;
+  }
+  if (status === "VOID") {
+    // Upstream bank cancelled the transaction. The row stays in the
+    // statement for the audit trail; no further actions are
+    // applicable. If an APPROVED match exists, the operator may need
+    // to reverse the JE manually — that's surfaced via the
+    // /api/internal/bank-lines response (approvedMatchesAffected).
+    return <span className="text-xs text-rose-700">voided by upstream</span>;
   }
   if (status === "IGNORED") {
     return (

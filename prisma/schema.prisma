@@ -306,12 +306,36 @@ model BankStatementLine {
   ignoredBy    String?
   ignoreReason String?
 
+  // Audit trail for MODIFIED upstream corrections (v1.2). When the
+  // bank corrects a transaction (gas-pump pre-auth → actual fillup,
+  // restaurant tip adjustment), integrations sends a modify signal
+  // via /api/internal/bank-lines and we update amount/description
+  // in place. These columns track the most-recent modification.
+  // Status stays at whatever it was — the operator needs to
+  // re-review matched lines whose amounts changed.
+  modifiedAt DateTime?
+  modifiedBy String?
+
+  // Audit trail for VOID status (v1.2). Populated when the upstream
+  // bank says a transaction was cancelled/reversed and integrations
+  // sends a remove signal. We never delete the row — voided lines
+  // stay visible in the statement for the audit history. Any
+  // PROPOSED matches get withdrawn; APPROVED matches are flagged
+  // (the JE may need manual reversal, but recon can't do that
+  // without operator action).
+  voidedAt   DateTime?
+  voidedBy   String?
+  voidReason String?
+
   matches       ReconciliationMatch[]
   aiSuggestions AiSuggestion[]
 
   @@unique([statementId, lineNo])
   @@index([statementId, status])
   @@index([transactionDate])
+  // External-ref lookup index — used by the bank-lines endpoint's
+  // modify + remove paths to find the line by Plaid's transaction_id.
+  @@index([externalRef])
   @@map("bank_statement_line")
 }
 
@@ -321,6 +345,7 @@ enum BankLineStatus {
   MATCHED // human approved the match
   IGNORED // human marked as not requiring reconciliation
   ADJUSTMENT // human posted an adjustment JE to resolve the line
+  VOID // upstream bank cancelled/reversed the transaction
 }
 
 // Bridges a BankStatementLine to a JournalLine via ledger-core. One bank

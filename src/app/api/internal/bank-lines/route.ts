@@ -12,17 +12,17 @@
 // in practice). Re-importing the same batch yields `linesCreated: 0`
 // and `linesSkipped: <N>`; no duplicate rows are inserted.
 //
-// Wire format:
+// Wire format (v1.2 — supports add / modify / remove in one call):
 //   POST /api/internal/bank-lines
 //   Authorization: Bearer $RECON_INTERNAL_API_TOKEN
 //   Content-Type: application/json
 //   {
 //     bankAccountCode: "WELLS-CHK-1234",   // recon's BankAccount.code; OR
-//     bankAccountId: "<uuid>",             // recon's BankAccount.id (one of the two is required)
+//     bankAccountId: "<uuid>",             // recon's BankAccount.id (one required)
 //     syncRunId: "abc-123",                // for filename + audit
 //     format: "PLAID_SYNC_V1",             // statement.format
 //     uploadedBy: "plaid-sync",
-//     lines: [
+//     lines: [                             // NEW transactions
 //       {
 //         externalId: "plaid-txn-...",     // dedupe key
 //         transactionDate: "2026-05-31",   // ISO date
@@ -31,15 +31,23 @@
 //         pending: false                   // ignored by recon today
 //       },
 //       ...
-//     ]
+//     ],
+//     modifiedLines: [...same shape...],    // OPTIONAL — upstream corrections
+//     removedExternalIds: ["plaid-txn-..."] // OPTIONAL — upstream cancellations
 //   }
 //
 // Success (200):
 //   {
 //     ok: true,
-//     bankStatementId: string | null,      // null if all lines were dups
+//     bankStatementId: string | null,      // null if no NEW lines created
 //     linesCreated: number,
-//     linesSkipped: number,
+//     linesSkipped: number,                // ADDED that already existed (dedup)
+//     linesModified: number,
+//     linesRemoved: number,                // count voided
+//     matchesWithdrawn: number,            // PROPOSED matches withdrawn on void
+//     approvedMatchesAffected: [
+//       { externalId, bankLineId, matchId }, // operator may need to reverse JE
+//     ],
 //     wasEmpty: boolean
 //   }
 //
@@ -82,7 +90,26 @@ interface JsonBody {
   syncRunId: string;
   format?: string;
   uploadedBy?: string;
+  /** New (ADDED) lines — existing behavior. */
   lines: JsonLineInput[];
+  /**
+   * MODIFIED lines (v1.2). Upstream connectors signal that a
+   * previously-imported transaction had its amount/description/date
+   * corrected. We look up by externalId and update the existing row
+   * in place. Status is preserved; modifiedAt/By columns record the
+   * audit trail. If no matching line exists, the modification is
+   * silently dropped (it's idempotent — the caller may not know
+   * which side has the line).
+   */
+  modifiedLines?: JsonLineInput[];
+  /**
+   * REMOVED externalIds (v1.2). Upstream says these transactions
+   * were cancelled/reversed. We flip status to VOID, populate
+   * voidedAt/By, and withdraw any PROPOSED matches. APPROVED matches
+   * stay (the JE may need manual reversal — operator's decision)
+   * but get surfaced in the response so the operator can act.
+   */
+  removedExternalIds?: string[];
 }
 
 type ErrorCode =
@@ -132,12 +159,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  if (body.lines.length === 0) {
+  const modifiedLinesInput = body.modifiedLines ?? [];
+  const removedExternalIds = body.removedExternalIds ?? [];
+  const hasAnyWork =
+    body.lines.length > 0 ||
+    modifiedLinesInput.length > 0 ||
+    removedExternalIds.length > 0;
+
+  if (!hasAnyWork) {
     return NextResponse.json({
       ok: true,
       bankStatementId: null,
       linesCreated: 0,
       linesSkipped: 0,
+      linesModified: 0,
+      linesRemoved: 0,
+      matchesWithdrawn: 0,
+      approvedMatchesAffected: [],
       wasEmpty: true,
     });
   }
@@ -161,22 +199,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Parse + validate each line. We sort by transactionDate so the
-  // synthesized statement period bounds are stable and ascending.
-  let parsed: Array<{
+  // Shared line parser. Used for both `lines` (ADDED) and
+  // `modifiedLines` (MODIFIED) — same JsonLineInput shape.
+  type ParsedLine = {
     externalId: string;
     transactionDate: Date;
     postedDate: Date | null;
     description: string;
     amount: Decimal;
-  }>;
-  try {
-    parsed = body.lines.map((l, idx) => {
-      if (!l.externalId) throw new Error(`line ${idx}: externalId required`);
-      if (!l.transactionDate) throw new Error(`line ${idx}: transactionDate required`);
+  };
+  function parseLines(input: JsonLineInput[], tag: string): ParsedLine[] {
+    return input.map((l, idx) => {
+      if (!l.externalId) throw new Error(`${tag}[${idx}]: externalId required`);
+      if (!l.transactionDate)
+        throw new Error(`${tag}[${idx}]: transactionDate required`);
       const tx = new Date(l.transactionDate);
       if (Number.isNaN(tx.getTime())) {
-        throw new Error(`line ${idx}: invalid transactionDate ${l.transactionDate}`);
+        throw new Error(
+          `${tag}[${idx}]: invalid transactionDate ${l.transactionDate}`
+        );
       }
       const amount = new Decimal(l.amount);
       return {
@@ -187,6 +228,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         amount,
       };
     });
+  }
+
+  // Parse + validate each line. We sort by transactionDate so the
+  // synthesized statement period bounds are stable and ascending.
+  let parsed: ParsedLine[];
+  let parsedModified: ParsedLine[];
+  try {
+    parsed = parseLines(body.lines, "lines");
+    parsedModified = parseLines(modifiedLinesInput, "modifiedLines");
   } catch (e) {
     return err(
       "BAD_REQUEST",
@@ -195,98 +245,233 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const sorted = [...parsed].sort(
-    (a, b) => a.transactionDate.getTime() - b.transactionDate.getTime()
-  );
+  // ─── ADDED ────────────────────────────────────────────────────────────
+  // Create a BankStatement + lines for the new transactions. Skipped
+  // entirely when body.lines is empty (modify/remove-only call).
+  let bankStatementId: string | null = null;
+  let linesCreated = 0;
+  let linesSkipped = 0;
 
-  // Dedupe by externalRef BEFORE creating the parent BankStatement.
-  // BankStatementLine.externalRef is the source of truth for "have we
-  // seen this transaction before?". Existing rows are simply skipped.
-  const externalIds = sorted.map((l) => l.externalId);
-  const alreadyImported = await prisma.bankStatementLine.findMany({
-    where: { externalRef: { in: externalIds } },
-    select: { externalRef: true },
-  });
-  const seenIds = new Set(
-    alreadyImported
-      .map((r) => r.externalRef)
-      .filter((x): x is string => !!x)
-  );
-  const fresh = sorted.filter((l) => !seenIds.has(l.externalId));
-  const linesSkipped = sorted.length - fresh.length;
-
-  if (fresh.length === 0) {
-    return NextResponse.json({
-      ok: true,
-      bankStatementId: null,
-      linesCreated: 0,
-      linesSkipped,
-      wasEmpty: false,
-    });
-  }
-
-  // Synthesize a BankStatement to parent these lines. v0.1 starts the
-  // opening at 0 and sets closing = signed-sum; a future revision can
-  // accept opening/closing balances from the connector when known.
-  const periodStart = fresh[0].transactionDate;
-  const periodEnd = fresh[fresh.length - 1].transactionDate;
-  const sumSigned = fresh.reduce((acc, l) => acc.plus(l.amount), new Decimal(0));
-  const filename = `${body.format ?? "EXTERNAL"}-${body.syncRunId.slice(0, 8)}.json`;
-  const rawPayload = JSON.stringify(
-    fresh.map((l) => ({
-      externalId: l.externalId,
-      date: l.transactionDate.toISOString().slice(0, 10),
-      amount: l.amount.toString(),
-      description: l.description,
-    })),
-    null,
-    2
-  );
-
-  try {
-    const statement = await prisma.bankStatement.create({
-      data: {
-        bankAccountId: bankAccount.id,
-        filename,
-        format: body.format ?? "EXTERNAL_V1",
-        rawPayload,
-        uploadedBy: body.uploadedBy ?? "internal-api",
-        periodStart,
-        periodEnd,
-        openingBalance: "0.0000",
-        closingBalance: sumSigned.toFixed(4),
-        totalLines: fresh.length,
-        matchedLines: 0,
-        pendingLines: fresh.length,
-        lines: {
-          create: fresh.map((l, idx) => ({
-            lineNo: idx + 1,
-            transactionDate: l.transactionDate,
-            postedDate: l.postedDate,
-            description: l.description,
-            amount: l.amount.toFixed(4),
-            externalRef: l.externalId,
-            status: "UNMATCHED",
-          })),
-        },
-      },
-      select: { id: true },
-    });
-
-    return NextResponse.json({
-      ok: true,
-      bankStatementId: statement.id,
-      linesCreated: fresh.length,
-      linesSkipped,
-      wasEmpty: false,
-    });
-  } catch (e) {
-    return err(
-      "INTERNAL_ERROR",
-      e instanceof Error ? e.message : "Unknown error creating BankStatement",
-      500
+  if (parsed.length > 0) {
+    const sorted = [...parsed].sort(
+      (a, b) => a.transactionDate.getTime() - b.transactionDate.getTime()
     );
+
+    // Dedupe by externalRef BEFORE creating the parent BankStatement.
+    // BankStatementLine.externalRef is the source of truth for "have we
+    // seen this transaction before?". Existing rows are simply skipped.
+    const externalIds = sorted.map((l) => l.externalId);
+    const alreadyImported = await prisma.bankStatementLine.findMany({
+      where: { externalRef: { in: externalIds } },
+      select: { externalRef: true },
+    });
+    const seenIds = new Set(
+      alreadyImported
+        .map((r) => r.externalRef)
+        .filter((x): x is string => !!x)
+    );
+    const fresh = sorted.filter((l) => !seenIds.has(l.externalId));
+    linesSkipped = sorted.length - fresh.length;
+
+    if (fresh.length > 0) {
+      // Synthesize a BankStatement to parent these lines.
+      const periodStart = fresh[0].transactionDate;
+      const periodEnd = fresh[fresh.length - 1].transactionDate;
+      const sumSigned = fresh.reduce(
+        (acc, l) => acc.plus(l.amount),
+        new Decimal(0)
+      );
+      const filename = `${body.format ?? "EXTERNAL"}-${body.syncRunId.slice(0, 8)}.json`;
+      const rawPayload = JSON.stringify(
+        fresh.map((l) => ({
+          externalId: l.externalId,
+          date: l.transactionDate.toISOString().slice(0, 10),
+          amount: l.amount.toString(),
+          description: l.description,
+        })),
+        null,
+        2
+      );
+
+      try {
+        const statement = await prisma.bankStatement.create({
+          data: {
+            bankAccountId: bankAccount.id,
+            filename,
+            format: body.format ?? "EXTERNAL_V1",
+            rawPayload,
+            uploadedBy: body.uploadedBy ?? "internal-api",
+            periodStart,
+            periodEnd,
+            openingBalance: "0.0000",
+            closingBalance: sumSigned.toFixed(4),
+            totalLines: fresh.length,
+            matchedLines: 0,
+            pendingLines: fresh.length,
+            lines: {
+              create: fresh.map((l, idx) => ({
+                lineNo: idx + 1,
+                transactionDate: l.transactionDate,
+                postedDate: l.postedDate,
+                description: l.description,
+                amount: l.amount.toFixed(4),
+                externalRef: l.externalId,
+                status: "UNMATCHED",
+              })),
+            },
+          },
+          select: { id: true },
+        });
+        bankStatementId = statement.id;
+        linesCreated = fresh.length;
+      } catch (e) {
+        return err(
+          "INTERNAL_ERROR",
+          e instanceof Error ? e.message : "Unknown error creating BankStatement",
+          500
+        );
+      }
+    }
   }
+
+  // ─── MODIFIED ─────────────────────────────────────────────────────────
+  // Update existing BankStatementLines in place. The dedup key is
+  // externalRef. Modifications to lines we never imported (mismatched
+  // accounts, race with a delete) are silently dropped — the signal
+  // is idempotent and we don't want a missing-line condition to fail
+  // the whole batch.
+  let linesModified = 0;
+  const uploadedBy = body.uploadedBy ?? "internal-api";
+  if (parsedModified.length > 0) {
+    try {
+      for (const m of parsedModified) {
+        const result = await prisma.bankStatementLine.updateMany({
+          where: { externalRef: m.externalId },
+          data: {
+            transactionDate: m.transactionDate,
+            postedDate: m.postedDate,
+            description: m.description,
+            amount: m.amount.toFixed(4),
+            modifiedAt: new Date(),
+            modifiedBy: uploadedBy,
+          },
+        });
+        linesModified += result.count;
+      }
+    } catch (e) {
+      return err(
+        "INTERNAL_ERROR",
+        e instanceof Error ? e.message : "Unknown error applying modifications",
+        500
+      );
+    }
+  }
+
+  // ─── REMOVED ──────────────────────────────────────────────────────────
+  // Flip lines to VOID + withdraw PROPOSED matches. APPROVED matches
+  // are NOT withdrawn — the upstream JE may already be posted, and
+  // recon can't reverse it without operator action. We surface them
+  // in approvedMatchesAffected so the operator can decide.
+  let linesRemoved = 0;
+  let matchesWithdrawn = 0;
+  const approvedMatchesAffected: Array<{
+    externalId: string;
+    bankLineId: string;
+    matchId: string;
+  }> = [];
+
+  if (removedExternalIds.length > 0) {
+    try {
+      // Look up the affected lines + their matches in one pass.
+      const affected = await prisma.bankStatementLine.findMany({
+        where: { externalRef: { in: removedExternalIds } },
+        select: {
+          id: true,
+          externalRef: true,
+          statementId: true,
+          status: true,
+          matches: {
+            where: { status: { in: ["PROPOSED", "APPROVED"] } },
+            select: { id: true, status: true },
+          },
+        },
+      });
+
+      for (const line of affected) {
+        // Count approved matches for the response — operator may need
+        // to reverse the JE.
+        for (const m of line.matches) {
+          if (m.status === "APPROVED") {
+            approvedMatchesAffected.push({
+              externalId: line.externalRef ?? "",
+              bankLineId: line.id,
+              matchId: m.id,
+            });
+          }
+        }
+
+        // Skip already-voided lines (idempotency).
+        if (line.status === "VOID") continue;
+
+        // Compute statement counter delta. If the line was UNMATCHED
+        // or PROPOSED it was pending → decrement pending. If MATCHED
+        // or ADJUSTMENT it was resolved → decrement matched.
+        const wasPending =
+          line.status === "UNMATCHED" || line.status === "PROPOSED";
+        const wasResolved =
+          line.status === "MATCHED" || line.status === "ADJUSTMENT";
+
+        await prisma.$transaction(async (tx) => {
+          await tx.bankStatementLine.update({
+            where: { id: line.id },
+            data: {
+              status: "VOID",
+              voidedAt: new Date(),
+              voidedBy: uploadedBy,
+              voidReason: "Upstream connector signaled removal",
+            },
+          });
+          // Withdraw any PROPOSED matches; APPROVED stays as-is.
+          const withdrawn = await tx.reconciliationMatch.updateMany({
+            where: { bankLineId: line.id, status: "PROPOSED" },
+            data: { status: "WITHDRAWN" },
+          });
+          matchesWithdrawn += withdrawn.count;
+          // Adjust statement counters.
+          if (wasPending) {
+            await tx.bankStatement.update({
+              where: { id: line.statementId },
+              data: { pendingLines: { decrement: 1 } },
+            });
+          } else if (wasResolved) {
+            await tx.bankStatement.update({
+              where: { id: line.statementId },
+              data: { matchedLines: { decrement: 1 } },
+            });
+          }
+        });
+        linesRemoved += 1;
+      }
+    } catch (e) {
+      return err(
+        "INTERNAL_ERROR",
+        e instanceof Error ? e.message : "Unknown error applying removals",
+        500
+      );
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    bankStatementId,
+    linesCreated,
+    linesSkipped,
+    linesModified,
+    linesRemoved,
+    matchesWithdrawn,
+    approvedMatchesAffected,
+    wasEmpty: linesCreated === 0 && linesModified === 0 && linesRemoved === 0,
+  });
 }
 
 export async function GET(): Promise<NextResponse> {
