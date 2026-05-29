@@ -1,8 +1,17 @@
 # CI for recon.
 #
-# tsc + unit tests on every PR / push to main. Tests here are pure-
-# function (parser, AI suggester with mocked SDK, ledger-bridge with
-# mocked fetch) — no DB required, no live API calls.
+# Two jobs:
+#
+#   test  — tsc + unit tests on every PR / push to main. Tests here
+#           are pure-function (parser, AI suggester with mocked SDK,
+#           ledger-bridge with mocked fetch) — no DB required, no
+#           live API calls.
+#
+#   smoke — runs scripts/smoke-test-ai.ts against real infrastructure.
+#           Exercises the AI match pipeline twice on the same line so
+#           the second call's cache-read tokens verify prompt caching
+#           is wired correctly. Manual trigger only — costs real
+#           Haiku tokens (~$0.002 per run) and assumes a seeded DB.
 #
 # Production deployment is via Vercel's GitHub integration. See
 # ledger-core/docs/DEPLOY.md for the full orchestration.
@@ -32,3 +41,49 @@ jobs:
         run: npx tsc --noEmit
       - name: Unit tests
         run: npx vitest run
+
+  smoke:
+    # Manual trigger only. Each run picks the first UNMATCHED bank line
+    # and exercises propose-matches twice — second call validates the
+    # prompt-cache hit pattern.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: recon_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Repo / org secrets (configure in GitHub Settings → Secrets and
+      # variables → Actions):
+      #   ANTHROPIC_API_KEY — for the AI match suggester (Haiku 4.5)
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/recon_smoke?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install dependencies
+        run: npm ci
+      - name: Provision schema
+        run: npx prisma db push --skip-generate
+      - name: Generate Prisma client
+        run: npx prisma generate
+      - name: Seed database
+        # Seeds ledger-core's substrate (entity, accounts, JEs) +
+        # recon's bank account/statement/lines fixture. The smoke
+        # script needs at least one UNMATCHED line to run.
+        run: npm run db:seed
+      - name: Run smoke test
+        run: npx tsx scripts/smoke-test-ai.ts
