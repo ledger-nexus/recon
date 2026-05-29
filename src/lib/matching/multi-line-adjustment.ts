@@ -88,6 +88,15 @@ export function buildCashLine(input: {
     throw new AdjustmentValidationError("Cannot post a $0 adjustment");
   }
   const abs = round2(signed.abs());
+  // Sub-penny defense for the cash line (mirror of the counter-line
+  // check). A bank line of $0.001 passes !isZero() above, then rounds
+  // to $0.00. Without this check the operator would see a downstream
+  // Σ DR = Σ CR balance error rather than a specific cash-line error.
+  if (abs.isZero()) {
+    throw new AdjustmentValidationError(
+      `Bank line amount ${signed.toFixed(4)} rounds to $0.00 at 2-decimal precision. Sub-penny bank amounts are not supported.`
+    );
+  }
   return signed.isPositive()
     ? { accountCode: input.cashAccountCode, debit: abs }
     : { accountCode: input.cashAccountCode, credit: abs };

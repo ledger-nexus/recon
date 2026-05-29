@@ -447,21 +447,12 @@ async function applyAdjustAction(input: {
   let postedRef!: { id: string; entryNumber: string };
   await prisma.$transaction(
     async (tx) => {
-      const posted = await postEntryViaLedgerCore(entryInput);
-
-      const cashJeLine = await tx.journalLine.findUnique({
-        where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
-        select: { id: true },
-      });
-      if (!cashJeLine) {
-        throw new Error(
-          `Posted entry ${posted.entryNumber} but could not locate its cash line — refusing to leave dangling match`
-        );
-      }
-
-      // Conditional transition: only flip to ADJUSTMENT if the line
-      // is STILL in a pre-resolved state. updateMany returns the
-      // count; 0 means a concurrent run beat us to it.
+      // Conditional transition FIRST — claims the row via the
+      // updateMany row-lock. If 0 rows match (concurrent run beat
+      // us to it), throw before incurring the bridge round-trip
+      // cost. Postgres serializes concurrent transactions on this
+      // row, so the second tx waits for the first to commit/abort
+      // then re-evaluates the WHERE.
       const transitionResult = await tx.bankStatementLine.updateMany({
         where: {
           id: input.bankLine.id,
@@ -472,6 +463,21 @@ async function applyAdjustAction(input: {
       if (transitionResult.count === 0) {
         throw new Error(
           `Bank line was already resolved by a concurrent action — skipping`
+        );
+      }
+
+      // Bridge call only happens after we've won the race. If the
+      // bridge or subsequent local writes fail, the txn rolls back
+      // including the status change.
+      const posted = await postEntryViaLedgerCore(entryInput);
+
+      const cashJeLine = await tx.journalLine.findUnique({
+        where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
+        select: { id: true },
+      });
+      if (!cashJeLine) {
+        throw new Error(
+          `Posted entry ${posted.entryNumber} but could not locate its cash line — refusing to leave dangling match`
         );
       }
 

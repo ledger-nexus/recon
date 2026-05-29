@@ -150,6 +150,33 @@ export async function postMultiLineAdjustmentAction(
 
     await prisma.$transaction(
       async (tx) => {
+        // Conditional transition FIRST — claims the row via
+        // updateMany's row lock and short-circuits the bridge call
+        // in the concurrent-loss case. Postgres serializes
+        // concurrent transactions on this row; the second tx waits
+        // for the first to commit/abort then re-evaluates WHERE.
+        //
+        // Pre-fix used unconditional tx.bankStatementLine.update,
+        // which would let two concurrent calls both transition the
+        // line (UNMATCHED → ADJUSTMENT then ADJUSTMENT → ADJUSTMENT
+        // is a no-op success), each creating a ReconciliationMatch
+        // and each incrementing statement counters.
+        const transitionResult = await tx.bankStatementLine.updateMany({
+          where: {
+            id: bankLine.id,
+            status: { in: ["UNMATCHED", "PROPOSED"] },
+          },
+          data: { status: "ADJUSTMENT" },
+        });
+        if (transitionResult.count === 0) {
+          throw new Error(
+            `Bank line was already resolved by a concurrent action — refusing to double-post`
+          );
+        }
+
+        // Bridge call only after we've won the race. If anything
+        // below fails, the txn rolls back including the status
+        // transition; on retry the bridge dedupes by sourceRecordId.
         const posted = await postEntryViaLedgerCore(entryInput);
 
         // ReconciliationMatch always points at lineNo=1, which is the
@@ -182,21 +209,15 @@ export async function postMultiLineAdjustmentAction(
           where: { bankLineId: bankLine.id, status: "PROPOSED" },
           data: { status: "WITHDRAWN" },
         });
-        await tx.bankStatementLine.update({
-          where: { id: bankLine.id },
-          data: { status: "ADJUSTMENT" },
+        // Statement counter — guaranteed safe because the conditional
+        // transition above just confirmed the line WAS pending.
+        await tx.bankStatement.update({
+          where: { id: bankLine.statementId },
+          data: {
+            matchedLines: { increment: 1 },
+            pendingLines: { decrement: 1 },
+          },
         });
-        const wasPending =
-          bankLine.status === "UNMATCHED" || bankLine.status === "PROPOSED";
-        if (wasPending) {
-          await tx.bankStatement.update({
-            where: { id: bankLine.statementId },
-            data: {
-              matchedLines: { increment: 1 },
-              pendingLines: { decrement: 1 },
-            },
-          });
-        }
         postedEntryNumberRef.value = posted.entryNumber;
       },
       { timeout: 30_000 }

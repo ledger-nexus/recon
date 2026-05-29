@@ -42,6 +42,15 @@ describe("buildCashLine", () => {
     ).toThrow(AdjustmentValidationError);
   });
 
+  it("rejects sub-penny bank amounts ($0.001 rounds to $0.00)", () => {
+    expect(() =>
+      buildCashLine({ cashAccountCode: "1000", bankLineAmount: "0.001" })
+    ).toThrow(/rounds to \$0\.00/);
+    expect(() =>
+      buildCashLine({ cashAccountCode: "1000", bankLineAmount: "-0.004" })
+    ).toThrow(/rounds to \$0\.00/);
+  });
+
   it("rounds the amount to 2dp", () => {
     const line = buildCashLine({
       cashAccountCode: "1000",
