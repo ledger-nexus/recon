@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { getCurrentTenant } from "@/lib/auth/session";
 import { RulesEditor } from "./rules-editor";
 import { findRuleConflicts, type RuleConflict } from "@/lib/matching/rule-conflicts";
+import { ImportExportControls } from "./import-export-controls";
 
 export default async function RulesPage() {
   const tenant = await getCurrentTenant();
@@ -289,6 +290,22 @@ export default async function RulesPage() {
               isActive: r.isActive,
             }))}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Import / export</CardTitle>
+          <span className="text-xs text-ink-500">
+            Export the active rule library to JSON for backup or to
+            share across tenants you administer. Import validates
+            the schema, re-runs the regex-safety policy on each rule,
+            classifies duplicates against the current library, and
+            shows a per-rule preview before any DB write.
+          </span>
+        </CardHeader>
+        <CardContent>
+          <ImportExportControls />
         </CardContent>
       </Card>
     </div>
