@@ -341,8 +341,14 @@ async function applyIgnoreAction(input: {
   previousStatus: "UNMATCHED" | "PROPOSED";
 }): Promise<void> {
   await prisma.$transaction(async (tx) => {
-    await tx.bankStatementLine.update({
-      where: { id: input.bankLineId },
+    // Conditional transition guards against per-line races (concurrent
+    // Apply rules invocations claiming the same line). If 0 rows
+    // affected, the line was already resolved — throw and skip.
+    const transitionResult = await tx.bankStatementLine.updateMany({
+      where: {
+        id: input.bankLineId,
+        status: { in: ["UNMATCHED", "PROPOSED"] },
+      },
       data: {
         status: "IGNORED",
         ignoredAt: new Date(),
@@ -350,13 +356,17 @@ async function applyIgnoreAction(input: {
         ignoreReason: `Auto-ignored by rule '${input.ruleName}'`,
       },
     });
+    if (transitionResult.count === 0) {
+      throw new Error(
+        `Bank line was already resolved by a concurrent action — skipping`
+      );
+    }
     // Withdraw any PROPOSED matches that were sitting on this line.
     await tx.reconciliationMatch.updateMany({
       where: { bankLineId: input.bankLineId, status: "PROPOSED" },
       data: { status: "WITHDRAWN" },
     });
-    // Only transition the statement's pending → matched counter if
-    // the line was previously pending (UNMATCHED or PROPOSED).
+    // Statement counter — line transitioned from pending to resolved.
     await tx.bankStatement.update({
       where: { id: input.statementId },
       data: {
@@ -416,47 +426,83 @@ async function applyAdjustAction(input: {
     sourceRecordType: "bank-line-rule-adjustment",
     sourceRecordId: input.bankLine.id,
   };
-  const posted = await postEntryViaLedgerCore(entryInput);
 
-  const cashJeLine = await prisma.journalLine.findUnique({
-    where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
-    select: { id: true },
-  });
-  if (!cashJeLine) {
-    throw new Error(
-      `Posted entry ${posted.entryNumber} but could not locate its cash line — refusing to leave dangling match`
-    );
-  }
+  // ATOMICITY + PER-LINE RACE: wrap bridge call + local writes in one
+  // transaction. Audit-pass fix.
+  //
+  // applyRulesToStatementAction selects all UNMATCHED/PROPOSED lines
+  // up front, then loops without re-checking each line's status before
+  // posting. A double-click on "Apply rules" could pass the initial
+  // selection check and then both calls would post to ledger-core.
+  // The bridge dedupes by sourceRecordId, so no double JE upstream —
+  // but the per-line ReconciliationMatch + statement counter writes
+  // would run twice locally, double-creating matches and
+  // double-incrementing counters.
+  //
+  // Fix: switch the bank-line transition to a conditional
+  // updateMany — if 0 rows match (line was already resolved by a
+  // concurrent run), throw and skip the rest of the local writes.
+  // Wrap bridge inside the txn so local + remote either both happen
+  // or both don't.
+  let postedRef!: { id: string; entryNumber: string };
+  await prisma.$transaction(
+    async (tx) => {
+      const posted = await postEntryViaLedgerCore(entryInput);
 
-  await prisma.$transaction(async (tx) => {
-    await tx.reconciliationMatch.create({
-      data: {
-        bankLineId: input.bankLine.id,
-        journalLineId: cashJeLine.id,
-        source: "MANUAL",
-        confidence: null,
-        status: "APPROVED",
-        appliedByEntryId: posted.id,
-        approvedAt: new Date(),
-        approvedBy: input.userEmail,
-      },
-    });
-    await tx.reconciliationMatch.updateMany({
-      where: { bankLineId: input.bankLine.id, status: "PROPOSED" },
-      data: { status: "WITHDRAWN" },
-    });
-    await tx.bankStatementLine.update({
-      where: { id: input.bankLine.id },
-      data: { status: "ADJUSTMENT" },
-    });
-    await tx.bankStatement.update({
-      where: { id: input.bankLine.statementId },
-      data: {
-        matchedLines: { increment: 1 },
-        pendingLines: { decrement: 1 },
-      },
-    });
-  });
+      const cashJeLine = await tx.journalLine.findUnique({
+        where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
+        select: { id: true },
+      });
+      if (!cashJeLine) {
+        throw new Error(
+          `Posted entry ${posted.entryNumber} but could not locate its cash line — refusing to leave dangling match`
+        );
+      }
+
+      // Conditional transition: only flip to ADJUSTMENT if the line
+      // is STILL in a pre-resolved state. updateMany returns the
+      // count; 0 means a concurrent run beat us to it.
+      const transitionResult = await tx.bankStatementLine.updateMany({
+        where: {
+          id: input.bankLine.id,
+          status: { in: ["UNMATCHED", "PROPOSED"] },
+        },
+        data: { status: "ADJUSTMENT" },
+      });
+      if (transitionResult.count === 0) {
+        throw new Error(
+          `Bank line was already resolved by a concurrent action — skipping`
+        );
+      }
+
+      await tx.reconciliationMatch.create({
+        data: {
+          bankLineId: input.bankLine.id,
+          journalLineId: cashJeLine.id,
+          source: "MANUAL",
+          confidence: null,
+          status: "APPROVED",
+          appliedByEntryId: posted.id,
+          approvedAt: new Date(),
+          approvedBy: input.userEmail,
+        },
+      });
+      await tx.reconciliationMatch.updateMany({
+        where: { bankLineId: input.bankLine.id, status: "PROPOSED" },
+        data: { status: "WITHDRAWN" },
+      });
+      await tx.bankStatement.update({
+        where: { id: input.bankLine.statementId },
+        data: {
+          matchedLines: { increment: 1 },
+          pendingLines: { decrement: 1 },
+        },
+      });
+      postedRef = { id: posted.id, entryNumber: posted.entryNumber };
+    },
+    { timeout: 30_000 }
+  );
+  const posted = postedRef;
 
   return { entryNumber: posted.entryNumber, entryId: posted.id };
 }

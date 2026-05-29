@@ -252,10 +252,13 @@ export function findRuleConflicts(rules: RuleSpec[]): RuleConflict[] {
       ) {
         const aUp = a.descriptionRegex.toUpperCase();
         const bUp = b.descriptionRegex.toUpperCase();
-        // Patterns share at least one common token (3+ chars) and
-        // neither contains the other — partial collision.
+        // Patterns share at least one meaningful common token and
+        // neither contains the other — partial collision. The 4-char
+        // threshold filters noise like "ID " (3 chars) and "AB "
+        // while still catching real merchant names like "AMEX", "VISA",
+        // "ACME", "PAYOUT", etc.
         const commonToken = longestCommonSubstring(aUp, bUp);
-        if (commonToken.length >= 3 && commonToken !== aUp && commonToken !== bUp) {
+        if (commonToken.length >= 4 && commonToken !== aUp && commonToken !== bUp) {
           conflicts.push({
             kind: "OVERLAP",
             winnerId: winner.id,

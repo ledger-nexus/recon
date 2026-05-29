@@ -129,62 +129,84 @@ export async function postMultiLineAdjustmentAction(
       sourceRecordId: bankLine.id,
     };
 
-    const posted = await postEntryViaLedgerCore(entryInput);
+    // ATOMICITY: wrap the bridge call + local writes in a single
+    // transaction. Audit-pass fix.
+    //
+    // Pre-fix: postEntryViaLedgerCore ran before the local
+    // $transaction. A network/DB failure after a successful bridge
+    // post left the JE orphaned upstream. Two concurrent clicks
+    // could pass the status check at line ~100, both call the
+    // bridge (which dedupes by sourceRecordId so no double JE), but
+    // each ran a fresh local txn — creating duplicate
+    // ReconciliationMatch rows and double-incrementing statement
+    // counters.
+    //
+    // Wrapping the bridge call inside the txn means: if the local
+    // writes fail, the txn rolls back; on retry the bridge dedupe
+    // returns the same JE and the local writes happen ONCE.
+    // Default interactive-tx timeout is 5s; bridge HTTP can take a
+    // few seconds, so we bump to 30s.
+    const postedEntryNumberRef: { value: string } = { value: "" };
 
-    // ReconciliationMatch always points at lineNo=1, which is the cash
-    // line (the validator places it first). That keeps the existing
-    // schema invariant: each bank line traces to one journal line —
-    // the one that hit cash.
-    const cashJeLine = await prisma.journalLine.findUnique({
-      where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
-      select: { id: true },
-    });
-    if (!cashJeLine) {
-      return {
-        ok: false,
-        message: `Posted entry ${posted.entryNumber} but could not find its cash line to link the match`,
-      };
-    }
+    await prisma.$transaction(
+      async (tx) => {
+        const posted = await postEntryViaLedgerCore(entryInput);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.reconciliationMatch.create({
-        data: {
-          bankLineId: bankLine.id,
-          journalLineId: cashJeLine.id,
-          source: "MANUAL",
-          confidence: null,
-          status: "APPROVED",
-          appliedByEntryId: posted.id,
-          approvedAt: new Date(),
-          approvedBy: user.email,
-        },
-      });
-      await tx.reconciliationMatch.updateMany({
-        where: { bankLineId: bankLine.id, status: "PROPOSED" },
-        data: { status: "WITHDRAWN" },
-      });
-      await tx.bankStatementLine.update({
-        where: { id: bankLine.id },
-        data: { status: "ADJUSTMENT" },
-      });
-      const wasPending =
-        bankLine.status === "UNMATCHED" || bankLine.status === "PROPOSED";
-      if (wasPending) {
-        await tx.bankStatement.update({
-          where: { id: bankLine.statementId },
+        // ReconciliationMatch always points at lineNo=1, which is the
+        // cash line (the validator places it first). That keeps the
+        // existing schema invariant: each bank line traces to one
+        // journal line — the one that hit cash.
+        const cashJeLine = await tx.journalLine.findUnique({
+          where: { entryId_lineNo: { entryId: posted.id, lineNo: 1 } },
+          select: { id: true },
+        });
+        if (!cashJeLine) {
+          throw new Error(
+            `Posted entry ${posted.entryNumber} but could not find its cash line to link the match`
+          );
+        }
+
+        await tx.reconciliationMatch.create({
           data: {
-            matchedLines: { increment: 1 },
-            pendingLines: { decrement: 1 },
+            bankLineId: bankLine.id,
+            journalLineId: cashJeLine.id,
+            source: "MANUAL",
+            confidence: null,
+            status: "APPROVED",
+            appliedByEntryId: posted.id,
+            approvedAt: new Date(),
+            approvedBy: user.email,
           },
         });
-      }
-    });
+        await tx.reconciliationMatch.updateMany({
+          where: { bankLineId: bankLine.id, status: "PROPOSED" },
+          data: { status: "WITHDRAWN" },
+        });
+        await tx.bankStatementLine.update({
+          where: { id: bankLine.id },
+          data: { status: "ADJUSTMENT" },
+        });
+        const wasPending =
+          bankLine.status === "UNMATCHED" || bankLine.status === "PROPOSED";
+        if (wasPending) {
+          await tx.bankStatement.update({
+            where: { id: bankLine.statementId },
+            data: {
+              matchedLines: { increment: 1 },
+              pendingLines: { decrement: 1 },
+            },
+          });
+        }
+        postedEntryNumberRef.value = posted.entryNumber;
+      },
+      { timeout: 30_000 }
+    );
 
     revalidatePath(`/statements/${bankLine.statementId}`);
     return {
       ok: true,
-      message: `Posted ${posted.entryNumber} via ledger-core (${validated.lines.length} lines)`,
-      entryNumber: posted.entryNumber,
+      message: `Posted ${postedEntryNumberRef.value} via ledger-core (${validated.lines.length} lines)`,
+      entryNumber: postedEntryNumberRef.value,
     };
   } catch (e) {
     if (e instanceof NotAuthenticatedError) {

@@ -212,6 +212,48 @@ describe("validateAdjustment — rejection cases", () => {
       })
     ).toThrow(/\$0 adjustment/);
   });
+
+  it("rejects sub-penny amounts that would round to $0.00 (audit-pass fix)", () => {
+    // $0.001 passes the !isZero() check on the unrounded Decimal
+    // but rounds to $0.00 at 2dp. The pre-fix validator silently
+    // elided such lines while keeping the JE "balanced".
+    expect(() =>
+      validateAdjustment({
+        cashAccountCode: "1000",
+        bankLineAmount: 100,
+        counterLines: [
+          { accountCode: "1200", side: "CREDIT", amount: 100 },
+          { accountCode: "6500", side: "CREDIT", amount: "0.001" },
+        ],
+      })
+    ).toThrow(/rounds to \$0.00/);
+  });
+
+  it("rejects $0.004 (rounds half-even to $0.00)", () => {
+    expect(() =>
+      validateAdjustment({
+        cashAccountCode: "1000",
+        bankLineAmount: 100,
+        counterLines: [
+          { accountCode: "1200", side: "CREDIT", amount: 100 },
+          { accountCode: "6500", side: "CREDIT", amount: "0.004" },
+        ],
+      })
+    ).toThrow(/rounds to \$0.00/);
+  });
+
+  it("accepts $0.01 (smallest valid amount)", () => {
+    const r = validateAdjustment({
+      cashAccountCode: "1000",
+      bankLineAmount: "100.01",
+      counterLines: [
+        { accountCode: "1200", side: "CREDIT", amount: "100.00" },
+        { accountCode: "1200", side: "CREDIT", amount: "0.01" },
+      ],
+    });
+    expect(r.totalDebits.toFixed(2)).toBe("100.01");
+    expect(r.totalCredits.toFixed(2)).toBe("100.01");
+  });
 });
 
 describe("validateAdjustment — penny-perfect rounding", () => {

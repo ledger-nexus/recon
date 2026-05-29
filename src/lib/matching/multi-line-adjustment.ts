@@ -161,6 +161,17 @@ export function validateAdjustment(
       );
     }
     const roundedAmt = round2(amt);
+    // Sub-penny defense: an operator-entered $0.001 line passes the
+    // !isZero() check above on its unrounded value, then rounds to
+    // $0.00 here. Without this guard the line silently contributes
+    // nothing to either DR or CR totals while the JE looks balanced —
+    // the operator's intent is erased without an error. Reject
+    // explicitly so the operator sees what happened.
+    if (roundedAmt.isZero()) {
+      throw new AdjustmentValidationError(
+        `Line ${i + 2} (${u.accountCode}): amount ${amt.toFixed(4)} rounds to $0.00 at 2-decimal precision. Sub-penny lines are not supported — enter at least $0.01.`
+      );
+    }
     if (u.side === "DEBIT") {
       totalDebits = totalDebits.plus(roundedAmt);
       counterForBridge.push({

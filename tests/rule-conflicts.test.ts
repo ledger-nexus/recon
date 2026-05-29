@@ -369,14 +369,28 @@ describe("findRuleConflicts — OVERLAP", () => {
     expect(cs[0].reason).toContain("STRIPE PAYOUT");
   });
 
-  it("doesn't flag when shared substring is short (< 3 chars)", () => {
-    // "ID" is too short to be meaningful overlap; treated as noise.
+  it("doesn't flag when shared substring is short (< 4 chars)", () => {
+    // "ID " (3 chars including space) is noise — not meaningful
+    // overlap. Threshold at 4 chars filters this.
     expect(
       findRuleConflicts([
         rule({ id: "r-1", descriptionRegex: "ID 123" }),
         rule({ id: "r-2", descriptionRegex: "ID 456" }),
       ])
-    ).toHaveLength(1); // Actually this WILL trigger ("ID " is 3 chars) — verify behavior
+    ).toEqual([]);
+  });
+
+  it("flags when shared substring is 4+ chars (meaningful token)", () => {
+    // 4 chars = token-level overlap. "AMEX", "VISA", "ACME", "PAYOUT"
+    // — these are the real merchant/operator patterns the heuristic
+    // wants to catch.
+    const cs = findRuleConflicts([
+      rule({ id: "r-1", descriptionRegex: "AMEX SUSPENSE" }),
+      rule({ id: "r-2", descriptionRegex: "AMEX TRAVEL" }),
+    ]);
+    expect(cs).toHaveLength(1);
+    expect(cs[0].kind).toBe("OVERLAP");
+    expect(cs[0].reason).toContain("AMEX");
   });
 });
 
