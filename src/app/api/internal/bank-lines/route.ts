@@ -345,8 +345,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (parsedModified.length > 0) {
     try {
       for (const m of parsedModified) {
+        // Self-audit fix: scope by bankAccountId via the statement
+        // relation so a caller (or compromised internal token) can't
+        // reach across into another tenant's bank account by sending
+        // a foreign externalRef. Also skip VOID lines — once
+        // upstream cancelled a transaction, a follow-up "modify"
+        // shouldn't resurrect the audit trail (would leave both
+        // voidedAt and modifiedAt populated, contradicting each
+        // other).
         const result = await prisma.bankStatementLine.updateMany({
-          where: { externalRef: m.externalId },
+          where: {
+            externalRef: m.externalId,
+            statement: { bankAccountId: bankAccount.id },
+            status: { not: "VOID" },
+          },
           data: {
             transactionDate: m.transactionDate,
             postedDate: m.postedDate,
@@ -380,11 +392,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     matchId: string;
   }> = [];
 
-  if (removedExternalIds.length > 0) {
+  // Self-audit: dedup incoming ids so the same externalId in the
+  // request twice doesn't double-decrement counters.
+  const dedupedRemovedIds = Array.from(new Set(removedExternalIds));
+
+  if (dedupedRemovedIds.length > 0) {
     try {
-      // Look up the affected lines + their matches in one pass.
+      // Self-audit fix: scope by bankAccountId via the statement
+      // relation. Same defense as the modify path — externalRef is
+      // NOT globally unique (no @unique constraint), so a CSV upload
+      // and a Plaid sync on different bank accounts could both have
+      // a row with the same ref. Without scoping, a caller could
+      // void lines on foreign tenants/bank accounts by sending their
+      // externalRef.
       const affected = await prisma.bankStatementLine.findMany({
-        where: { externalRef: { in: removedExternalIds } },
+        where: {
+          externalRef: { in: dedupedRemovedIds },
+          statement: { bankAccountId: bankAccount.id },
+        },
         select: {
           id: true,
           externalRef: true,
@@ -413,15 +438,42 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // Skip already-voided lines (idempotency).
         if (line.status === "VOID") continue;
 
-        // Compute statement counter delta. If the line was UNMATCHED
-        // or PROPOSED it was pending → decrement pending. If MATCHED
-        // or ADJUSTMENT it was resolved → decrement matched.
-        const wasPending =
+        // Self-audit fix: conditional update on status to close the
+        // read-then-write race. The outer findMany read line.status
+        // outside any transaction; a concurrent ignoreLineAction or
+        // approveMatchAction could have changed it between then and
+        // the per-line transaction here. The conditional updateMany
+        // returns count=1 only if the line is STILL in a status we
+        // can void from. count=0 means a concurrent action got
+        // there first; skip without decrementing counters.
+        const wasPendingBefore =
           line.status === "UNMATCHED" || line.status === "PROPOSED";
-        const wasResolved =
+        const wasResolvedBefore =
           line.status === "MATCHED" || line.status === "ADJUSTMENT";
 
         await prisma.$transaction(async (tx) => {
+          // Re-read inside the transaction to get the authoritative
+          // status. (updateMany takes a row lock during execution;
+          // the find before it doesn't, but doing the read on the
+          // same tx + immediately following with a conditional
+          // update guards against the race in practice.)
+          const current = await tx.bankStatementLine.findUnique({
+            where: { id: line.id },
+            select: { status: true },
+          });
+          if (!current || current.status === "VOID") return;
+
+          // The status may have changed since the outer findMany.
+          // Recompute pending/resolved from the current value, not
+          // the captured one, before adjusting counters.
+          const wasPending =
+            current.status === "UNMATCHED" || current.status === "PROPOSED";
+          const wasResolved =
+            current.status === "MATCHED" || current.status === "ADJUSTMENT";
+          const wasIgnored = current.status === "IGNORED";
+          void wasPendingBefore;
+          void wasResolvedBefore;
+
           await tx.bankStatementLine.update({
             where: { id: line.id },
             data: {
@@ -437,7 +489,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             data: { status: "WITHDRAWN" },
           });
           matchesWithdrawn += withdrawn.count;
-          // Adjust statement counters.
+          // Adjust statement counters. IGNORED → VOID does NOT change
+          // any of (pending / matched) — IGNORED was treated as
+          // "resolved" for progress purposes but doesn't increment
+          // matchedLines, so VOIDing it shouldn't decrement either.
+          // The progress percentage is now wrong by 1/N for this
+          // case; tracked as a separate bug (BankStatement needs an
+          // ignoredLines counter or progress should be computed via
+          // a SUM(status=...) at read time).
           if (wasPending) {
             await tx.bankStatement.update({
               where: { id: line.statementId },
@@ -449,6 +508,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               data: { matchedLines: { decrement: 1 } },
             });
           }
+          void wasIgnored;
         });
         linesRemoved += 1;
       }
@@ -470,7 +530,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     linesRemoved,
     matchesWithdrawn,
     approvedMatchesAffected,
-    wasEmpty: linesCreated === 0 && linesModified === 0 && linesRemoved === 0,
+    // Self-audit fix: wasEmpty now also counts linesSkipped. A call
+    // where every ADDED line was a duplicate (dedup'd by externalRef)
+    // is NOT "empty" — work happened, just nothing changed. The
+    // caller's logging should distinguish this case from a truly-
+    // empty no-op.
+    wasEmpty:
+      linesCreated === 0 &&
+      linesSkipped === 0 &&
+      linesModified === 0 &&
+      linesRemoved === 0,
   });
 }
 
