@@ -155,3 +155,27 @@ function deriveCode(err: unknown): string | undefined {
   if (err instanceof CrossTenantAccessError) return "NOT_FOUND";
   return undefined;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CC8 — Schema-drift detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+let schemaFingerprintCache: string | null = null;
+export function schemaFingerprint(): string {
+  const cached = schemaFingerprintCache;
+  if (cached) return cached;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const PrismaClientCtor = require("@prisma/client").PrismaClient;
+  const proto = PrismaClientCtor.prototype as Record<string, unknown>;
+  const modelKeys = Object.keys(proto)
+    .filter((k) => !k.startsWith("$") && !k.startsWith("_"))
+    .sort();
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const hash = require("node:crypto")
+    .createHash("sha256")
+    .update(modelKeys.join("|"))
+    .digest("hex")
+    .slice(0, 16);
+  schemaFingerprintCache = hash;
+  return hash;
+}
