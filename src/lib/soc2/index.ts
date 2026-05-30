@@ -179,3 +179,12 @@ export function schemaFingerprint(): string {
   schemaFingerprintCache = hash;
   return hash;
 }
+
+// Field-level encryption (Confidentiality TSC).
+export {
+  encryptField,
+  decryptField,
+  looksEncrypted,
+  FieldEncryptionError,
+  KeyNotConfiguredError,
+} from "./field-encryption";
