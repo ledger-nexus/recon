@@ -65,6 +65,11 @@ afterAll(async () => {
   await rawPrisma.party.deleteMany({
     where: { code: { contains: SUFFIX } },
   });
+  // Per-test BankAccount rows from the BankAccount encryption tests
+  // (code shape: ENC-BA-{SUFFIX}-{perTestHex}).
+  await rawPrisma.bankAccount.deleteMany({
+    where: { code: { contains: `ENC-BA-${SUFFIX}` } },
+  });
   await rawPrisma.$disconnect();
 });
 
@@ -206,5 +211,85 @@ describe("encrypted-fields extension: Party READ side (Confidentiality TSC)", ()
     });
     expect(party?.displayName).toBe(plaintextDisplayName);
     expect(party?.code).toBe(partyCode);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BankAccount — recon-owned. The trio of displayName + bankName +
+// accountNumberLast4 is the "financial profile of this account" surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("encrypted-fields extension: BankAccount (Confidentiality TSC)", () => {
+  let testBankAccountId: string;
+  let testCode: string;
+  const plaintextDisplayName = `Chase Operating — Acme ${SUFFIX}`;
+  const plaintextBankName = `JPMorgan Chase ${SUFFIX}`;
+  const plaintextLast4 = "9876";
+
+  beforeEach(async () => {
+    const { prisma } = await import("@/lib/db");
+    const entity = await rawPrisma.legalEntity.findFirst({
+      where: { code: "NORTHWIND" },
+      select: { id: true },
+    });
+    if (!entity) throw new Error("NORTHWIND entity missing");
+    const cashAccount = await rawPrisma.account.findFirst({
+      where: { code: "1000", OR: [{ entityId: null }, { entityId: entity.id }] },
+      select: { id: true },
+    });
+    if (!cashAccount) throw new Error("Cash account 1000 missing");
+    // Per-test unique code so the @unique index doesn't collide
+    // between `it(...)` blocks.
+    testCode = `ENC-BA-${SUFFIX}-${randomBytes(2).toString("hex")}`;
+    // Write via the EXTENDED client so the extension encrypts on
+    // the way in.
+    const created = await prisma.bankAccount.create({
+      data: {
+        entityId: entity.id,
+        accountId: cashAccount.id,
+        code: testCode,
+        displayName: plaintextDisplayName,
+        bankName: plaintextBankName,
+        accountNumberLast4: plaintextLast4,
+      },
+    });
+    testBankAccountId = created.id;
+  });
+
+  it("on-disk displayName, bankName, accountNumberLast4 are ciphertext", async () => {
+    const raw = await rawPrisma.bankAccount.findUnique({
+      where: { id: testBankAccountId },
+      select: {
+        displayName: true,
+        bankName: true,
+        accountNumberLast4: true,
+        code: true,
+      },
+    });
+    expect(raw?.displayName).not.toBe(plaintextDisplayName);
+    expect(looksEncrypted(raw?.displayName)).toBe(true);
+    expect(raw?.bankName).not.toBe(plaintextBankName);
+    expect(looksEncrypted(raw?.bankName)).toBe(true);
+    expect(raw?.accountNumberLast4).not.toBe(plaintextLast4);
+    expect(looksEncrypted(raw?.accountNumberLast4)).toBe(true);
+    // code stays plaintext (lookup key)
+    expect(raw?.code).toBe(testCode);
+  });
+
+  it("app surface auto-decrypts all three columns on read", async () => {
+    const { prisma } = await import("@/lib/db");
+    const acct = await prisma.bankAccount.findUnique({
+      where: { id: testBankAccountId },
+      select: {
+        displayName: true,
+        bankName: true,
+        accountNumberLast4: true,
+        code: true,
+      },
+    });
+    expect(acct?.displayName).toBe(plaintextDisplayName);
+    expect(acct?.bankName).toBe(plaintextBankName);
+    expect(acct?.accountNumberLast4).toBe(plaintextLast4);
+    expect(acct?.code).toBe(testCode);
   });
 });

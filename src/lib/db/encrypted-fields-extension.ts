@@ -78,6 +78,24 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   // queries filter by displayName (only `code` is searchable), so
   // AES-GCM is safe — no need for deterministic encryption.
   { model: "Party", field: "displayName" },
+  // BankAccount.{displayName,bankName,accountNumberLast4} are the
+  // human-readable identifiers of the customer's bank accounts as
+  // shown in recon's dashboard, statements list, and accounts page.
+  //
+  // - displayName: free-text, e.g. "Chase Operating — Acme Corp"
+  // - bankName: institution name, e.g. "Chase"
+  // - accountNumberLast4: 4 digits — strong financial identifier
+  //
+  // The trio together = "we know this customer banks at <institution>
+  // with account ending <last4> nicknamed <displayName>". A leaked
+  // bank_account table is a financial-profiling goldmine.
+  //
+  // BankAccount.code is the lookup key (unique, used in WHERE
+  // clauses) and stays plaintext. Audited 2026-05-31: zero filter
+  // queries on the three encrypted columns; only display reads.
+  { model: "BankAccount", field: "displayName" },
+  { model: "BankAccount", field: "bankName" },
+  { model: "BankAccount", field: "accountNumberLast4" },
 ];
 
 function isEncryptedColumn(model: string, field: string): boolean {
