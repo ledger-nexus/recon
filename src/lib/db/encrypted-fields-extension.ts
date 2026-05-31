@@ -55,9 +55,18 @@ import {
  * extension transparently encrypts. Order doesn't matter; lookups
  * happen by model + field.
  */
+/**
+ * Encryption mode per column. Defaults to "string" — see
+ * ledger-core's master extension for the full rationale on the
+ * "json" mode (JSON.stringify before AES-GCM; JSON.parse after
+ * decrypt; ciphertext envelope stored as a quoted-string JsonValue).
+ */
+export type EncryptedColumnType = "string" | "json";
+
 export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   model: string;
   field: string;
+  type?: EncryptedColumnType;
 }> = [
   // BankStatementLine.description is the free-text vendor / payment
   // identifier from the bank (e.g., "TST*BROOKLYN GRIND" or "ACH
@@ -114,6 +123,18 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   // happens once on upload, decrypt only on the (rare) audit read.
   { model: "BankStatement", field: "filename" },
   { model: "BankStatement", field: "rawPayload" },
+  // AiSuggestion.candidatesJson is the model's structured response:
+  // an array of { journalLineId, confidence, rationale }. The
+  // rationale field is free-text — it's literally the model
+  // explaining "this looks like the Acme invoice from 4/22 because
+  // amounts and timing match" — so it embeds customer names + ledger
+  // context per candidate. Json mode.
+  //
+  // The AI audit panel (/ai-audit) renders this as a structured
+  // list; the extension hands it back as the parsed JsonValue so
+  // existing code keeps treating it as `AiCandidateJson[]`.
+  // Audited 2026-05-31: zero filter queries on candidatesJson.
+  { model: "AiSuggestion", field: "candidatesJson", type: "json" },
 ];
 
 function isEncryptedColumn(model: string, field: string): boolean {
@@ -122,6 +143,14 @@ function isEncryptedColumn(model: string, field: string): boolean {
 
 function fieldsForModel(model: string): string[] {
   return ENCRYPTED_COLUMNS.filter((c) => c.model === model).map((c) => c.field);
+}
+
+/** Returns the encryption mode for a (model, field), or "string" by default. */
+function columnType(model: string, field: string): EncryptedColumnType {
+  const entry = ENCRYPTED_COLUMNS.find(
+    (c) => c.model === model && c.field === field
+  );
+  return entry?.type ?? "string";
 }
 
 /**
@@ -215,6 +244,63 @@ function safeDecrypt(value: unknown): unknown {
       // The ciphertext is in the row but we can't decrypt. Return a
       // sentinel so the application can render "[Encryption error]"
       // rather than crash.
+      return "[encrypted — key not configured]";
+    }
+    if (e instanceof FieldEncryptionError) {
+      return "[encryption error — contact support]";
+    }
+    throw e;
+  }
+}
+
+/**
+ * Encrypt a JsonValue. JSON.stringify the value first so AES-GCM can
+ * do its thing on a string, then store the base64 ciphertext envelope
+ * as the Json column's value. Quoted strings are legal JsonValues, so
+ * Prisma is happy. Mirror of ledger-core's safeEncryptJson.
+ */
+function safeEncryptJson(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string" && looksEncrypted(value)) return value;
+  try {
+    return encryptField(JSON.stringify(value));
+  } catch (e) {
+    if (e instanceof KeyNotConfiguredError) {
+      if (!warnedAboutMissingKey) {
+        console.warn(
+          "[encrypted-fields] FIELD_ENCRYPTION_KEY is not set; Json columns " +
+            "in ENCRYPTED_COLUMNS write plaintext. Set the env var to enable."
+        );
+        warnedAboutMissingKey = true;
+      }
+      return value;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Decrypt a JsonValue read from Prisma. If Prisma gave us a string
+ * that looksEncrypted, decrypt + JSON.parse to recover the original
+ * JsonValue. Otherwise pass through (mixed plaintext/ciphertext
+ * during rollout). Mirror of ledger-core's safeDecryptJson.
+ */
+function safeDecryptJson(value: unknown): unknown {
+  if (typeof value !== "string" || value.length === 0) return value;
+  if (!looksEncrypted(value)) return value;
+  try {
+    const plaintext = decryptField(value);
+    if (plaintext === null) return value;
+    try {
+      return JSON.parse(plaintext);
+    } catch {
+      // Shouldn't happen — we JSON.stringify on write — but if a row
+      // was written by some other path with non-JSON ciphertext,
+      // surface the decrypted string rather than crash.
+      return plaintext;
+    }
+  } catch (e) {
+    if (e instanceof KeyNotConfiguredError) {
       return "[encrypted — key not configured]";
     }
     if (e instanceof FieldEncryptionError) {
@@ -325,7 +411,9 @@ function encryptDataObject(model: string, data: unknown): unknown {
   const fields = fieldsForModel(model);
   const out: Record<string, unknown> = { ...(data as Record<string, unknown>) };
 
-  // Encrypt direct fields on this model.
+  // Encrypt direct fields on this model. Route by column type:
+  // Json fields go through safeEncryptJson (JSON.stringify-before-
+  // AES-GCM); String fields go through safeEncrypt directly.
   for (const field of fields) {
     if (!(field in out)) continue;
     const value = out[field];
@@ -333,15 +421,17 @@ function encryptDataObject(model: string, data: unknown): unknown {
       out[field] = value;
       continue;
     }
+    const type = columnType(model, field);
+    const encrypt = type === "json" ? safeEncryptJson : safeEncrypt;
     // Prisma write-operation values can be `{ set: ... }` for nested
     // update inputs. Unwrap before encrypting and re-wrap on the way
     // out so the underlying generator still recognizes the shape.
-    if (typeof value === "object" && "set" in value) {
+    if (typeof value === "object" && value !== null && "set" in value) {
       const wrapped = value as { set: unknown };
-      out[field] = { set: safeEncrypt(wrapped.set) };
+      out[field] = { set: encrypt(wrapped.set) };
       continue;
     }
-    out[field] = safeEncrypt(value);
+    out[field] = encrypt(value);
   }
 
   // Recurse into nested relation writes. Prisma's $extends query
@@ -398,7 +488,8 @@ function decryptRow<T>(model: string, row: T): T {
     if (!(field in out)) continue;
     const value = out[field];
     if (value === null || value === undefined) continue;
-    out[field] = safeDecrypt(value);
+    const type = columnType(model, field);
+    out[field] = type === "json" ? safeDecryptJson(value) : safeDecrypt(value);
   }
   return out as T;
 }

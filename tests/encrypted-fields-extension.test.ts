@@ -359,3 +359,96 @@ describe("encrypted-fields extension: BankStatement (Confidentiality TSC)", () =
     expect(stmt?.format).toBe("TEST");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AiSuggestion.candidatesJson — Json-mode column. Verifies the type:
+// "json" extension mode round-trips the matcher's structured response
+// (array of {journalLineId, confidence, rationale}) exactly, while the
+// on-disk Json column holds a string (the ciphertext envelope).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("encrypted-fields extension: AiSuggestion.candidatesJson (Json mode, Confidentiality TSC)", () => {
+  let suggestionId: string;
+  let bankLineId: string;
+  // Representative matcher output: rationale embeds customer name +
+  // dollar context — the actual PII surface the encryption protects.
+  const plaintextCandidates = [
+    {
+      journalLineId: `je-line-stub-${SUFFIX}-a`,
+      confidence: 0.92,
+      rationale: `Acme Corp ACH credit on 4/22 matches bank line amount $5,000 within 1-day window (${SUFFIX})`,
+    },
+    {
+      journalLineId: `je-line-stub-${SUFFIX}-b`,
+      confidence: 0.18,
+      rationale: "Long-shot — only amount matches; date is 14 days off",
+    },
+  ];
+
+  beforeEach(async () => {
+    const { prisma } = await import("@/lib/db");
+    // Need a bank statement + line to anchor the suggestion (FK
+    // requirement). Use the file-level bankAccountId.
+    const statement = await prisma.bankStatement.create({
+      data: {
+        bankAccountId,
+        filename: `ai-test-${SUFFIX}.csv`,
+        format: "TEST",
+        rawPayload: "test fixture",
+        periodStart: new Date("2026-04-01"),
+        periodEnd: new Date("2026-04-30"),
+        openingBalance: "0.0000",
+        closingBalance: "5000.0000",
+        totalLines: 1,
+        pendingLines: 1,
+        matchedLines: 0,
+        lines: {
+          create: [
+            {
+              lineNo: 1,
+              transactionDate: new Date("2026-04-22"),
+              description: `ACH credit Acme ${SUFFIX}`,
+              amount: "5000.0000",
+            },
+          ],
+        },
+      },
+      include: { lines: true },
+    });
+    bankLineId = statement.lines[0].id;
+    const created = await prisma.aiSuggestion.create({
+      data: {
+        bankLineId,
+        candidatesJson: plaintextCandidates as unknown as object,
+        modelName: `claude-haiku-4-5-test-${SUFFIX}`,
+      },
+    });
+    suggestionId = created.id;
+  });
+
+  it("on-disk candidatesJson is a STRING (the ciphertext envelope), not the original array", async () => {
+    const raw = await rawPrisma.aiSuggestion.findUnique({
+      where: { id: suggestionId },
+      select: { candidatesJson: true, modelName: true },
+    });
+    expect(typeof raw?.candidatesJson).toBe("string");
+    expect(looksEncrypted(raw?.candidatesJson as string)).toBe(true);
+    const rawStr = String(raw?.candidatesJson ?? "");
+    // The distinctive bits of the plaintext rationale must not leak
+    // through.
+    expect(rawStr).not.toContain("Acme");
+    expect(rawStr).not.toContain(SUFFIX);
+    expect(rawStr).not.toContain("4/22");
+    // modelName stays plaintext — used for cache-hit analytics.
+    expect(raw?.modelName).toBe(`claude-haiku-4-5-test-${SUFFIX}`);
+  });
+
+  it("app surface decrypts candidatesJson back into the exact original array", async () => {
+    const { prisma } = await import("@/lib/db");
+    const s = await prisma.aiSuggestion.findUnique({
+      where: { id: suggestionId },
+      select: { candidatesJson: true },
+    });
+    expect(s?.candidatesJson).toEqual(plaintextCandidates);
+  });
+});
