@@ -293,3 +293,69 @@ describe("encrypted-fields extension: BankAccount (Confidentiality TSC)", () => 
     expect(acct?.code).toBe(testCode);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BankStatement.{filename, rawPayload} — the audit surface of a
+// statement upload. rawPayload is the full CSV body (tens of KB),
+// so the test verifies AES-GCM handles arbitrary sizes correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("encrypted-fields extension: BankStatement (Confidentiality TSC)", () => {
+  let statementId: string;
+  const plaintextFilename = `chase-may-2026-${SUFFIX}.csv`;
+  // A realistic-ish multi-line CSV body — verifies the helper
+  // handles newlines, commas, and unicode within a single ciphertext.
+  const plaintextRawPayload = [
+    "Date,Description,Amount,Balance",
+    `2026-05-01,Opening balance,,1000.00`,
+    `2026-05-03,ACH credit — Acme Corp inv 4321 (${SUFFIX}),5000.00,6000.00`,
+    `2026-05-15,Wire fee,-25.00,5975.00`,
+    `2026-05-20,Vendor: Lögística Düsseldorf GmbH,-432.10,5542.90`,
+    `2026-05-31,Closing balance,,5542.90`,
+  ].join("\n");
+
+  beforeEach(async () => {
+    const { prisma } = await import("@/lib/db");
+    const created = await prisma.bankStatement.create({
+      data: {
+        bankAccountId,
+        filename: plaintextFilename,
+        format: "TEST",
+        rawPayload: plaintextRawPayload,
+        periodStart: new Date("2026-05-01"),
+        periodEnd: new Date("2026-05-31"),
+        openingBalance: "1000.0000",
+        closingBalance: "5542.9000",
+        totalLines: 3,
+        pendingLines: 3,
+        matchedLines: 0,
+      },
+    });
+    statementId = created.id;
+  });
+
+  it("on-disk filename and rawPayload are ciphertext", async () => {
+    const raw = await rawPrisma.bankStatement.findUnique({
+      where: { id: statementId },
+      select: { filename: true, rawPayload: true, format: true },
+    });
+    expect(raw?.filename).not.toBe(plaintextFilename);
+    expect(looksEncrypted(raw?.filename)).toBe(true);
+    expect(raw?.rawPayload).not.toBe(plaintextRawPayload);
+    expect(looksEncrypted(raw?.rawPayload)).toBe(true);
+    // format stays plaintext — used for parser dispatch ("CHASE_CSV_V1"
+    // etc.); not a PII surface.
+    expect(raw?.format).toBe("TEST");
+  });
+
+  it("app surface decrypts both columns on read", async () => {
+    const { prisma } = await import("@/lib/db");
+    const stmt = await prisma.bankStatement.findUnique({
+      where: { id: statementId },
+      select: { filename: true, rawPayload: true, format: true },
+    });
+    expect(stmt?.filename).toBe(plaintextFilename);
+    expect(stmt?.rawPayload).toBe(plaintextRawPayload);
+    expect(stmt?.format).toBe("TEST");
+  });
+});

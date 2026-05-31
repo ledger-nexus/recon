@@ -96,6 +96,24 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   { model: "BankAccount", field: "displayName" },
   { model: "BankAccount", field: "bankName" },
   { model: "BankAccount", field: "accountNumberLast4" },
+  // BankStatement.filename + rawPayload are the bank-side audit
+  // surface of a statement upload:
+  //
+  // - filename:   uploaded CSV name (e.g. "chase-may-2026.csv").
+  //               Reveals institution + period.
+  // - rawPayload: verbatim CSV body — every transaction with
+  //               amounts, dates, balances, descriptions. Highest
+  //               single-row PII density in recon by far.
+  //
+  // Both are write-only in production code (no re-parser path
+  // reads rawPayload, no filter query touches filename). Audited
+  // 2026-05-31: zero filter queries on either column.
+  //
+  // Note on size: rawPayload can be tens of KB for a busy month;
+  // AES-GCM handles it transparently and the per-statement encrypt
+  // happens once on upload, decrypt only on the (rare) audit read.
+  { model: "BankStatement", field: "filename" },
+  { model: "BankStatement", field: "rawPayload" },
 ];
 
 function isEncryptedColumn(model: string, field: string): boolean {
