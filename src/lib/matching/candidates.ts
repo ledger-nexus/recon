@@ -16,6 +16,19 @@
 //
 // Returns rows shaped to feed both the deterministic scorer and the AI
 // suggester. Caller wraps them.
+//
+// SOC 2 CC6.1 — tenant isolation (transitive). This helper is called
+// AFTER the caller (see src/app/actions/propose-matches.ts) has already
+// tenant-scoped the originating bankLine via the
+// `statement.bankAccount.entity.tenantId === actor.tenantId` chain. The
+// `bankAccountId` arg therefore arrives pre-authorized. The downstream
+// journalLine query constrains by `entry.entityId === bankAccount.entityId`;
+// because `LegalEntity.tenantId` is NOT NULL and `LegalEntity.id` is
+// unique, a single entityId resolves to exactly one tenant, so the JE
+// lines + party joins returned here cannot cross a tenant boundary.
+// Party now carries its own tenantId column (synced from ledger-core)
+// for any future call sites that need direct Party reads, but this
+// helper relies on the structural transitivity.
 
 import { Decimal } from "decimal.js";
 import { prisma } from "@/lib/db";

@@ -52,6 +52,7 @@ model LegalEntity {
 
   journalEntries JournalEntry[]
   bankAccounts   BankAccount[]
+  parties        Party[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -110,10 +111,22 @@ model Account {
 
 model Party {
   id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId      String? @db.Uuid
+  // SOC 2 CC6.1: Party carries tenantId at the column level in the shared
+  // DB (ledger-core owns the schema). Declaring it here lets recon's
+  // queries that traverse JournalLine.party tenant-scope explicitly when
+  // the call site has the actor tenant in hand. Backrefs other than
+  // JournalLine (PartyRole, ArOpenItem, ApOpenItem, RevenueContract,
+  // FixedAsset, Lease) are omitted on purpose — recon doesn't model
+  // those tables.
+  tenantId      String  @db.Uuid
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId      String? @db.Uuid // null = shared across entities
+  entity        LegalEntity? @relation(fields: [entityId], references: [id])
   code          String
   displayName   String
   parentPartyId String? @db.Uuid
+  parent        Party?  @relation("PartyHierarchy", fields: [parentPartyId], references: [id])
+  children      Party[] @relation("PartyHierarchy")
 
   journalLines JournalLine[]
 
@@ -128,6 +141,7 @@ model Party {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
   @@map("party")
 }
 
@@ -596,6 +610,7 @@ model Tenant {
   rateLimitEvents      RateLimitEvent[]
   aiSpendAlerts        AiSpendAlert[]
   matchingRules        MatchingRule[]
+  parties              Party[]
 
   @@map("tenant")
 }

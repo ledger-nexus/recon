@@ -149,8 +149,8 @@ describe("encrypted-fields extension: BankStatementLine (Confidentiality TSC)", 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Party.displayName — READ side. Recon does NOT own Party (ledger-core
-// writes it). The extension's job on this end is purely to decrypt
-// what ledger-core encrypted. The matching pipeline at
+// writes it in production). The extension's job on this end is purely
+// to decrypt what ledger-core encrypted. The matching pipeline at
 // `src/lib/matching/candidates.ts` line 103 includes `party.displayName`
 // in the candidate payload; if the extension wasn't wired here, the
 // UI would surface ciphertext.
@@ -161,12 +161,13 @@ describe("encrypted-fields extension: Party READ side (Confidentiality TSC)", ()
   let partyCode: string;
   const plaintextDisplayName = `Customer Acme Corp ${SUFFIX}`;
 
-  // Production reality: recon NEVER writes Party (only ledger-core
-  // does — Party doesn't even expose `tenantId` in recon's Prisma
-  // schema mirror, intentionally). We simulate the "ledger-core
-  // already encrypted this row and persisted it" state by inserting
-  // raw ciphertext via SQL with the tenantId column populated, then
-  // verify recon's extended client decrypts it on read.
+  // Recon never writes Party in production (ledger-core owns the
+  // write path), but recon's schema mirror now exposes tenantId on
+  // Party — the column has always existed in the shared DB; recon's
+  // model just declares it for SOC 2 CC6.1 visibility. That lets the
+  // fixture use a normal prisma.party.create through the raw client
+  // and have the extension encrypt on the way in, matching how
+  // ledger-core writes the row in production.
   beforeEach(async () => {
     // Per-test unique code so two `it(...)` blocks don't collide on
     // the (entityId, code) unique index.
@@ -176,18 +177,17 @@ describe("encrypted-fields extension: Party READ side (Confidentiality TSC)", ()
       select: { id: true, tenantId: true },
     });
     if (!entity) throw new Error("NORTHWIND entity missing");
-    const { encryptField } = await import("@/lib/soc2/field-encryption");
-    const ct = encryptField(plaintextDisplayName);
-    if (!ct) throw new Error("encryptField returned null");
-    // Raw SQL insert because recon's Party schema mirror omits
-    // tenantId (recon never writes Party in production — this gap
-    // is intentional / consistent with the no-write contract).
-    const rows = await rawPrisma.$queryRaw<{ id: string }[]>`
-      INSERT INTO party (id, "tenantId", "entityId", code, "displayName", "createdAt", "updatedAt")
-      VALUES (gen_random_uuid(), ${entity.tenantId}::uuid, ${entity.id}::uuid, ${partyCode}, ${ct}, NOW(), NOW())
-      RETURNING id::text
-    `;
-    partyId = rows[0].id;
+    const { prisma } = await import("@/lib/db");
+    const created = await prisma.party.create({
+      data: {
+        tenantId: entity.tenantId,
+        entityId: entity.id,
+        code: partyCode,
+        displayName: plaintextDisplayName,
+      },
+      select: { id: true },
+    });
+    partyId = created.id;
   });
 
   it("on-disk Party.displayName is encrypted (raw prisma probe)", async () => {
