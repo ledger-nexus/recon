@@ -179,11 +179,18 @@ export function decryptField(blob: string | null | undefined): string | null {
  */
 export function looksEncrypted(value: string | null | undefined): boolean {
   if (value == null || value === "") return false;
+  // Reject anything that isn't a STRICT base64 string. See the
+  // ledger-core master copy of this helper for the full rationale
+  // (false-positive caught 2026-05-31 during the revenue-rec rollout
+  // when a plaintext starting with "Acme" passed the original
+  // heuristic). This mirror must stay in sync.
+  if (value.length % 4 !== 0) return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
   try {
     const raw = Buffer.from(value, "base64");
-    return (
-      raw.length >= 1 + IV_BYTES + TAG_BYTES && raw[0] === VERSION_V1
-    );
+    if (raw.length < 1 + IV_BYTES + TAG_BYTES) return false;
+    if (raw[0] !== VERSION_V1) return false;
+    return raw.toString("base64") === value;
   } catch {
     return false;
   }
