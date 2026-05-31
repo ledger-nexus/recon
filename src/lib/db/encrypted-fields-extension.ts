@@ -66,6 +66,18 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<{
   // counterparties, and rough activity pattern. Highest-value target
   // in recon.
   { model: "BankStatementLine", field: "description" },
+  // Party.displayName is the customer / vendor / contact name as it
+  // appears on AR/AP, JE detail, and the aging reports in ledger-core.
+  // Recon doesn't WRITE Party (it's owned by ledger-core), but the
+  // matching pipeline READS it: `src/lib/matching/candidates.ts` joins
+  // JournalLine → party.displayName to display the counterparty
+  // alongside each match candidate. Without this registry entry, the
+  // matcher would surface ciphertext to the user. A leaked Party
+  // table = a leaked customer roster, which is also a competitive-
+  // intelligence asset. Audited 2026-05-29 across all 5 repos: zero
+  // queries filter by displayName (only `code` is searchable), so
+  // AES-GCM is safe — no need for deterministic encryption.
+  { model: "Party", field: "displayName" },
 ];
 
 function isEncryptedColumn(model: string, field: string): boolean {

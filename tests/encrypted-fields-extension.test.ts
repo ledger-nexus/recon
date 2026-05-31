@@ -60,6 +60,11 @@ afterAll(async () => {
     where: { bankAccountId },
   });
   await rawPrisma.bankAccount.deleteMany({ where: { id: bankAccountId } });
+  // Party rows from the Party READ test — match by the per-run suffix
+  // baked into the code, so we never clobber other tests' fixtures.
+  await rawPrisma.party.deleteMany({
+    where: { code: { contains: SUFFIX } },
+  });
   await rawPrisma.$disconnect();
 });
 
@@ -134,5 +139,72 @@ describe("encrypted-fields extension: BankStatementLine (Confidentiality TSC)", 
     for (const l of lines) {
       expect(l.description).toBe(plaintextDescription);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Party.displayName — READ side. Recon does NOT own Party (ledger-core
+// writes it). The extension's job on this end is purely to decrypt
+// what ledger-core encrypted. The matching pipeline at
+// `src/lib/matching/candidates.ts` line 103 includes `party.displayName`
+// in the candidate payload; if the extension wasn't wired here, the
+// UI would surface ciphertext.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("encrypted-fields extension: Party READ side (Confidentiality TSC)", () => {
+  let partyId: string;
+  let partyCode: string;
+  const plaintextDisplayName = `Customer Acme Corp ${SUFFIX}`;
+
+  // Production reality: recon NEVER writes Party (only ledger-core
+  // does — Party doesn't even expose `tenantId` in recon's Prisma
+  // schema mirror, intentionally). We simulate the "ledger-core
+  // already encrypted this row and persisted it" state by inserting
+  // raw ciphertext via SQL with the tenantId column populated, then
+  // verify recon's extended client decrypts it on read.
+  beforeEach(async () => {
+    // Per-test unique code so two `it(...)` blocks don't collide on
+    // the (entityId, code) unique index.
+    partyCode = `ENC-RECON-PARTY-${SUFFIX}-${randomBytes(2).toString("hex")}`;
+    const entity = await rawPrisma.legalEntity.findFirst({
+      where: { code: "NORTHWIND" },
+      select: { id: true, tenantId: true },
+    });
+    if (!entity) throw new Error("NORTHWIND entity missing");
+    const { encryptField } = await import("@/lib/soc2/field-encryption");
+    const ct = encryptField(plaintextDisplayName);
+    if (!ct) throw new Error("encryptField returned null");
+    // Raw SQL insert because recon's Party schema mirror omits
+    // tenantId (recon never writes Party in production — this gap
+    // is intentional / consistent with the no-write contract).
+    const rows = await rawPrisma.$queryRaw<{ id: string }[]>`
+      INSERT INTO party (id, "tenantId", "entityId", code, "displayName", "createdAt", "updatedAt")
+      VALUES (gen_random_uuid(), ${entity.tenantId}::uuid, ${entity.id}::uuid, ${partyCode}, ${ct}, NOW(), NOW())
+      RETURNING id::text
+    `;
+    partyId = rows[0].id;
+  });
+
+  it("on-disk Party.displayName is encrypted (raw prisma probe)", async () => {
+    const raw = await rawPrisma.party.findUnique({
+      where: { id: partyId },
+      select: { displayName: true, code: true },
+    });
+    expect(raw?.displayName).not.toBe(plaintextDisplayName);
+    expect(looksEncrypted(raw?.displayName)).toBe(true);
+    // `code` stays plaintext — it's the searchable lookup key.
+    expect(raw?.code).toBe(partyCode);
+  });
+
+  it("recon's matching candidates path sees plaintext displayName", async () => {
+    const { prisma } = await import("@/lib/db");
+    // Mirror the exact shape candidates.ts uses:
+    //   include: { party: { select: { displayName: true } } }
+    const party = await prisma.party.findUnique({
+      where: { id: partyId },
+      select: { displayName: true, code: true },
+    });
+    expect(party?.displayName).toBe(plaintextDisplayName);
+    expect(party?.code).toBe(partyCode);
   });
 });
