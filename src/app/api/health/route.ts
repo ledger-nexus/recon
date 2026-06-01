@@ -15,6 +15,11 @@
 //     the Postgres connection is alive.
 //   - monitoring: { sentryDsnPresent } — SOC 2 CC7 evidence that the
 //     error monitor is wired (the actual DSN value is NEVER exposed).
+//   - encryption: { configured, columnCount } — SOC 2 CC6
+//     (Confidentiality TSC) evidence that FIELD_ENCRYPTION_KEY is set
+//     AND well-formed (64 hex chars). columnCount surfaces how many
+//     columns the deployed extension is encrypting. The KEY VALUE
+//     ITSELF and any hash of it is NEVER exposed — only the boolean.
 //   - version: git short SHA if VERCEL_GIT_COMMIT_SHA is set, else
 //     "dev".
 //
@@ -29,6 +34,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { schemaFingerprint } from "@/lib/soc2";
+import { ENCRYPTED_COLUMNS } from "@/lib/db/encrypted-fields-extension";
 
 // Force the Node.js runtime — schemaFingerprint requires the
 // Prisma client which doesn't run on the Edge.
@@ -47,12 +53,30 @@ interface HealthResponse {
   monitoring: {
     sentryDsnPresent: boolean;
   };
+  encryption: {
+    /** True iff FIELD_ENCRYPTION_KEY is set AND a valid 64-char hex string. */
+    configured: boolean;
+    /** Number of (model, field) tuples the extension is configured to encrypt. */
+    columnCount: number;
+  };
   version: string;
   uptimeSeconds: number;
   timestamp: string;
 }
 
 const PROCESS_STARTED_AT_MS = Date.now();
+
+/**
+ * Inspect FIELD_ENCRYPTION_KEY without revealing it. Returns a boolean
+ * indicating whether the key is present + well-formed. Never logs the
+ * value, never returns a hash or substring.
+ */
+function isEncryptionKeyConfigured(): boolean {
+  const k = process.env.FIELD_ENCRYPTION_KEY;
+  if (!k) return false;
+  // 64 hex chars (the AES-256-GCM key length).
+  return /^[0-9a-fA-F]{64}$/.test(k);
+}
 
 export async function GET(): Promise<NextResponse> {
   const sentryDsnPresent = !!process.env.SENTRY_DSN;
@@ -93,6 +117,10 @@ export async function GET(): Promise<NextResponse> {
       ? { reachable: true, latencyMs: dbLatencyMs }
       : { reachable: false, error: dbError ?? "unknown" },
     monitoring: { sentryDsnPresent },
+    encryption: {
+      configured: isEncryptionKeyConfigured(),
+      columnCount: ENCRYPTED_COLUMNS.length,
+    },
     version,
     uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT_MS) / 1000),
     timestamp: new Date().toISOString(),
