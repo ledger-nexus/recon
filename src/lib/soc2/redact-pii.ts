@@ -87,13 +87,19 @@ function redact(value: unknown): unknown {
   if (typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map(redact);
   // Special handling for Error objects — preserve the shape so the
-  // caller can still see .name + .stack, but redact .message (which
-  // often embeds user input).
+  // caller can still see .name + .stack, but redact .message AND
+  // strip the message-preamble from the stack.
+  //
+  // 14th-pass H1 fix: V8 embeds the error's own .message as the
+  // first line of .stack ("Error: alice@x.com\n    at ..."). Without
+  // this stripping, redactPii(new Error("alice@x.com")) returns
+  // { message: "[REDACTED]", stack: "Error: alice@x.com\n..." } —
+  // a clean Confidentiality TSC leak via the stack.
   if (value instanceof Error) {
     return {
       name: value.name,
       message: REDACTED,
-      stack: value.stack,
+      stack: stripStackPreamble(value.stack),
     };
   }
   const out: Record<string, unknown> = {};
@@ -113,3 +119,43 @@ function redact(value: unknown): unknown {
  * convention (TypeScript doesn't enforce, but a code reviewer should).
  */
 export const PII_FIELDS = PII_FIELD_NAMES;
+
+/**
+ * Strip the leading `Error: <message>` line(s) from a V8 stack trace
+ * so the original error message doesn't leak via .stack after .message
+ * has been redacted. Replaces the preamble with `Error: [REDACTED]`
+ * (preserving the "Error: " prefix that Sentry's grouping algorithm
+ * expects on the first line).
+ *
+ * Returns the stack unchanged if no V8-shaped frames are found.
+ *
+ * Exported for testing only — call sites should use redactPii(err).
+ */
+export function stripStackPreamble(stack: string | undefined): string | undefined {
+  if (!stack) return stack;
+  const firstFrameIdx = stack.indexOf("\n    at ");
+  if (firstFrameIdx < 0) return stack;
+  return `Error: [REDACTED]${stack.slice(firstFrameIdx)}`;
+}
+
+/**
+ * Sanitize an unknown error value before handing to Sentry's
+ * `captureException(err, ...)`. Returns a NEW Error with .message
+ * redacted + .stack preamble stripped if the input was an Error;
+ * otherwise returns the input unchanged.
+ *
+ * Why a NEW error rather than mutating: the caller's catch block
+ * may still use `err` after captureError returns. Mutating
+ * `err.message` would leak into user-visible error messages.
+ *
+ * Why we don't just `redactPii(err)`: redactPii returns a plain
+ * object, losing Error-class identity that Sentry's grouping
+ * algorithm needs.
+ */
+export function sanitizeErrorForCapture(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const cleaned = new Error(REDACTED);
+  cleaned.name = err.name;
+  cleaned.stack = stripStackPreamble(err.stack);
+  return cleaned;
+}
