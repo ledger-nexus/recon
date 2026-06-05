@@ -11,6 +11,7 @@ const sections: { label: string; items: { href: string; label: string; hint?: st
     items: [
       { href: "/statements", label: "Bank statements" },
       { href: "/statements/new", label: "+ Upload statement" },
+      { href: "/import/netsuite", label: "+ Import NS" },
       { href: "/accounts", label: "Bank accounts" },
     ],
   },
