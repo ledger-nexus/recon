@@ -92,3 +92,66 @@ Always use `Decimal` from `decimal.js`. Bank amounts are signed (positive = depo
 1. Read this file.
 2. Read `docs/ARCHITECTURE.md` (the relationship to ledger-core).
 3. Confirm: does this work belong in recon (suggesting / matching) or ledger-core (posting / reporting)?
+
+## SOC 2 — every change must satisfy these controls
+
+This is financial software. SOC 2 Trust Services Criteria apply. The
+helper module is in `src/lib/soc2/index.ts` (mirror of ledger-core's
+master copy); the `/soc2` skill auto-surfaces the framework on
+auth/data/audit work. Before completing any task, verify the change
+conforms to the rules below — if a rule can't be satisfied, flag it
+explicitly and ask before proceeding. Run `/soc2-check` on the diff
+before marking work done.
+
+- **Multi-tenant isolation (CC6.1):** every customer-data table carries
+  `tenantId`. Every query that loads a row by id ALSO constrains by
+  tenantId. Use `findFirst({ where: { id, tenantId } })` then
+  `assertTenantScope()` from `@/lib/soc2` — never
+  `findUnique({ where: { id } })` on customer data. The 2026-05-29
+  audit-pass swept this across the bank-lines route and matching
+  pipelines; do not regress.
+- **Audit logging (CC5/CC6/CC7):** privileged mutations emit audit
+  rows. This repo POSTs to ledger-core's internal audit endpoint
+  rather than writing the table directly. Do not bypass.
+- **Authorization (CC6.3):** every Server Action / API route gates on
+  per-tenant role via the policy module. "Signed in" is necessary but
+  NEVER sufficient.
+- **Input validation (CC6.8):** every request body validates via Zod
+  before use. Never trust a client-supplied id without re-checking
+  ownership server-side.
+- **Secrets handling (CC6.7):** no hardcoded secrets. Read from
+  `process.env`. Token comparisons go through `constantTimeEqual`
+  from `@/lib/soc2` — never `===`. Inbound webhooks always verify
+  cryptographic signatures.
+- **Logging hygiene (Confidentiality TSC):** every `console.log` that
+  includes user data runs the payload through `redactPii()` from
+  `@/lib/soc2` first.
+- **Error responses (CC7):** every error sent to a client goes
+  through `sanitizeError()`. Raw `err.message + err.stack` MUST NOT
+  cross the wire.
+- **Field-level encryption (CC6 — Confidentiality TSC):** confidential
+  columns are AES-256-GCM-encrypted at rest via the Prisma extension
+  in `src/lib/db/encrypted-fields-extension.ts`. Adding a new
+  confidential column = adding it to `ENCRYPTED_COLUMNS` in that file
+  + writing a backfill in `scripts/encrypt-{model}-{field}.ts` +
+  testing the roundtrip in `tests/encrypted-fields-extension.test.ts`.
+  Use `type: "json"` mode for `Json`-typed columns. Look at any of
+  the existing rollouts as a reference.
+
+  **Currently encrypted in recon:**
+    - `BankStatementLine.description`
+    - `Party.displayName` (READ side — ledger-core writes)
+    - `BankAccount.{displayName, bankName, accountNumberLast4}`
+    - `BankStatement.{filename, rawPayload}`
+    - `AiSuggestion.candidatesJson` (Json mode)
+
+  Reads in tests that touch encrypted columns must go through the
+  extended client (`import { prisma } from "@/lib/db"`). A raw
+  `new PrismaClient()` returns ciphertext.
+
+When you finish a unit of work, run `/soc2-check` on the diff. Commit
+messages on security-relevant changes should cite the Common Criterion
+(e.g., `(CC6 — IDOR defense)`). The full gap analysis lives in
+ledger-core at `docs/SOC2_READINESS.md`; the production rollout
+procedure for encryption columns lives at
+`ledger-core/docs/runbooks/encryption-rollout.md`.

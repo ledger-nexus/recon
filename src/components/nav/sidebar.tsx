@@ -12,6 +12,7 @@ const sections: { label: string; items: { href: string; label: string; hint?: st
       { href: "/statements", label: "Bank statements" },
       { href: "/statements/new", label: "+ Upload statement" },
       { href: "/accounts", label: "Bank accounts" },
+      { href: "/rules", label: "Matching rules" },
     ],
   },
   {

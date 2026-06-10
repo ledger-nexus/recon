@@ -11,14 +11,16 @@
 // useTransition keeps the row interactive during the round-trip and gives
 // us a pending state for the buttons.
 
-import { useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
+import { Decimal } from "decimal.js";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { proposeMatchesAction } from "@/app/actions/propose-matches";
 import { approveMatchAction, rejectMatchAction } from "@/app/actions/decide-match";
-import { postAdjustmentAction } from "@/app/actions/post-adjustment";
+import { postMultiLineAdjustmentAction } from "@/app/actions/post-multi-line-adjustment";
 import { ignoreLineAction, unignoreLineAction } from "@/app/actions/ignore-line";
+import { computeRunningImbalance } from "@/lib/matching/multi-line-adjustment";
 
 export interface ProposalView {
   matchId: string;
@@ -33,19 +35,94 @@ export interface ProposalView {
 
 interface Props {
   bankLineId: string;
-  status: "UNMATCHED" | "PROPOSED" | "MATCHED" | "IGNORED" | "ADJUSTMENT";
+  status: "UNMATCHED" | "PROPOSED" | "MATCHED" | "IGNORED" | "ADJUSTMENT" | "VOID";
   proposals: ProposalView[];
+  /** Signed bank-line amount as a string (positive = deposit, negative = withdrawal). */
+  bankLineAmount: string;
+  /** GL account code for the cash side of the JE. */
+  cashAccountCode: string;
 }
 
-export function LineActions({ bankLineId, status, proposals }: Props) {
+/**
+ * One row in the operator-controlled portion of the adjustment editor.
+ * The cash row is rendered separately (fixed, computed from the bank
+ * line) and is NOT in this list.
+ */
+interface CounterLineDraft {
+  /** Stable local id so React keys + delete-by-index work. */
+  key: string;
+  accountCode: string;
+  side: "DEBIT" | "CREDIT";
+  /** Free-text amount; parsed into Decimal at validate time. */
+  amount: string;
+  partyCode: string;
+  description: string;
+}
+
+export function LineActions({
+  bankLineId,
+  status,
+  proposals,
+  bankLineAmount,
+  cashAccountCode,
+}: Props) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [adjustOpen, setAdjustOpen] = useState(false);
-  const [adjAccount, setAdjAccount] = useState("");
   const [adjMemo, setAdjMemo] = useState("");
+  const [counterLines, setCounterLines] = useState<CounterLineDraft[]>(() => [
+    initialCounterDraft(bankLineAmount),
+  ]);
   const [ignoreOpen, setIgnoreOpen] = useState(false);
   const [ignoreReason, setIgnoreReason] = useState("");
+
+  // Live balance check on every keystroke. The validator is the source
+  // of truth at submit time; this just gives the operator early feedback.
+  const balance = useMemo(
+    () =>
+      computeRunningImbalance({
+        cashAccountCode,
+        bankLineAmount,
+        counterLines: counterLines.map((c) => ({
+          accountCode: c.accountCode,
+          side: c.side,
+          amount: c.amount.trim() === "" ? 0 : c.amount,
+          partyCode: c.partyCode || null,
+          description: c.description || null,
+        })),
+      }),
+    [bankLineAmount, cashAccountCode, counterLines]
+  );
+  const cashSide = useMemo<"DEBIT" | "CREDIT">(() => {
+    try {
+      const v = new Decimal(bankLineAmount);
+      return v.isPositive() ? "DEBIT" : "CREDIT";
+    } catch {
+      return "DEBIT";
+    }
+  }, [bankLineAmount]);
+  const cashAbs = useMemo(() => {
+    try {
+      return new Decimal(bankLineAmount).abs().toFixed(2);
+    } catch {
+      return "0.00";
+    }
+  }, [bankLineAmount]);
+
+  function addCounterLine() {
+    setCounterLines((cur) => [...cur, initialCounterDraft(bankLineAmount, cur.length)]);
+  }
+  function removeCounterLine(key: string) {
+    setCounterLines((cur) => (cur.length <= 1 ? cur : cur.filter((c) => c.key !== key)));
+  }
+  function updateCounterLine(key: string, patch: Partial<CounterLineDraft>) {
+    setCounterLines((cur) => cur.map((c) => (c.key === key ? { ...c, ...patch } : c)));
+  }
+  function resetAdjustForm() {
+    setCounterLines([initialCounterDraft(bankLineAmount)]);
+    setAdjMemo("");
+  }
 
   function clearStatus() {
     setError(null);
@@ -104,23 +181,35 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
 
   function onAdjust() {
     clearStatus();
-    if (!adjAccount.trim()) {
-      setError("Counter-account code is required (e.g. 6500 for bank fees)");
+    // Soft client-side check; the action validates authoritatively.
+    if (!balance.imbalance.isZero()) {
+      setError(
+        `Lines don't balance: ${balance.totalDebits.toFixed(2)} DR vs ${balance.totalCredits.toFixed(2)} CR (off by ${balance.imbalance.abs().toFixed(2)})`
+      );
+      return;
+    }
+    if (counterLines.some((c) => !c.accountCode.trim() || !c.amount.trim())) {
+      setError("Every line needs an account code and an amount");
       return;
     }
     startTransition(async () => {
-      const res = await postAdjustmentAction({
+      const res = await postMultiLineAdjustmentAction({
         bankLineId,
-        counterAccountCode: adjAccount.trim(),
         memo: adjMemo.trim() || undefined,
+        counterLines: counterLines.map((c) => ({
+          accountCode: c.accountCode.trim(),
+          side: c.side,
+          amount: c.amount.trim(),
+          partyCode: c.partyCode.trim() || null,
+          description: c.description.trim() || null,
+        })),
       });
       if (!res.ok) {
         setError(res.message);
       } else {
         setSuccess(res.message);
         setAdjustOpen(false);
-        setAdjAccount("");
-        setAdjMemo("");
+        resetAdjustForm();
       }
     });
   }
@@ -130,6 +219,14 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
   }
   if (status === "ADJUSTMENT") {
     return <span className="text-xs text-ink-400">adjustment posted</span>;
+  }
+  if (status === "VOID") {
+    // Upstream bank cancelled the transaction. The row stays in the
+    // statement for the audit trail; no further actions are
+    // applicable. If an APPROVED match exists, the operator may need
+    // to reverse the JE manually — that's surfaced via the
+    // /api/internal/bank-lines response (approvedMatchesAffected).
+    return <span className="text-xs text-rose-700">voided by upstream</span>;
   }
   if (status === "IGNORED") {
     return (
@@ -181,24 +278,118 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
           </Button>
         </div>
         {adjustOpen ? (
-          <div className="flex w-72 flex-col gap-1.5 rounded-md border border-ink-200 bg-white p-2">
+          <div className="flex w-[28rem] flex-col gap-2 rounded-md border border-ink-200 bg-white p-3 text-left">
             <div className="text-[11px] text-ink-500">
-              Posts a two-line JE through ledger-core: cash + counter-account, signed to match the bank line.
+              Multi-line adjustment JE via ledger-core. Cash side is fixed by
+              the bank line; add as many counter lines as needed (e.g., split
+              deposit net of fees, bundled vendor wire). Σ DR must equal Σ CR.
             </div>
-            <Input
-              placeholder="Counter account code (e.g. 6500)"
-              value={adjAccount}
-              onChange={(e) => setAdjAccount(e.target.value)}
-              disabled={pending}
-            />
+
+            {/* Cash row — fixed, computed from the bank line */}
+            <div className="grid grid-cols-[1fr_64px_96px_1fr_24px] items-center gap-1.5 border-b border-dashed border-ink-200 pb-1.5">
+              <Input
+                value={cashAccountCode}
+                disabled
+                title="Cash GL account (from the bank account config)"
+              />
+              <Badge tone="neutral">{cashSide}</Badge>
+              <Input
+                value={cashAbs}
+                disabled
+                className="amount-cell text-right"
+                title="Absolute bank-line amount; sign drives DR/CR side"
+              />
+              <span className="text-[11px] text-ink-500">cash (auto)</span>
+              <span />
+            </div>
+
+            {/* Operator-controlled counter rows */}
+            {counterLines.map((c, i) => (
+              <div
+                key={c.key}
+                className="grid grid-cols-[1fr_64px_96px_1fr_24px] items-center gap-1.5"
+              >
+                <Input
+                  placeholder="Account (e.g. 6500)"
+                  value={c.accountCode}
+                  onChange={(e) =>
+                    updateCounterLine(c.key, { accountCode: e.target.value })
+                  }
+                  disabled={pending}
+                />
+                <select
+                  className="h-9 rounded-md border border-ink-200 bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ink-300"
+                  value={c.side}
+                  onChange={(e) =>
+                    updateCounterLine(c.key, {
+                      side: e.target.value as "DEBIT" | "CREDIT",
+                    })
+                  }
+                  disabled={pending}
+                >
+                  <option value="DEBIT">DR</option>
+                  <option value="CREDIT">CR</option>
+                </select>
+                <Input
+                  placeholder="Amount"
+                  type="text"
+                  inputMode="decimal"
+                  value={c.amount}
+                  onChange={(e) =>
+                    updateCounterLine(c.key, { amount: e.target.value })
+                  }
+                  disabled={pending}
+                  className="amount-cell text-right"
+                />
+                <Input
+                  placeholder="Party (optional)"
+                  value={c.partyCode}
+                  onChange={(e) =>
+                    updateCounterLine(c.key, { partyCode: e.target.value })
+                  }
+                  disabled={pending}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeCounterLine(c.key)}
+                  disabled={pending || counterLines.length <= 1}
+                  className="text-ink-400 hover:text-rose-600 disabled:opacity-40"
+                  title="Remove this line"
+                  aria-label={`Remove line ${i + 2}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={addCounterLine}
+                disabled={pending}
+              >
+                + Add line
+              </Button>
+              <BalanceIndicator
+                totalDr={balance.totalDebits.toFixed(2)}
+                totalCr={balance.totalCredits.toFixed(2)}
+                imbalance={balance.imbalance.toFixed(2)}
+              />
+            </div>
+
             <Input
               placeholder="Memo (optional)"
               value={adjMemo}
               onChange={(e) => setAdjMemo(e.target.value)}
               disabled={pending}
             />
-            <Button size="sm" onClick={onAdjust} disabled={pending}>
-              {pending ? "Posting…" : "Post via ledger-core"}
+            <Button
+              size="sm"
+              onClick={onAdjust}
+              disabled={pending || !balance.imbalance.isZero()}
+            >
+              {pending ? "Posting…" : `Post ${counterLines.length + 1}-line JE via ledger-core`}
             </Button>
           </div>
         ) : null}
@@ -264,6 +455,87 @@ export function LineActions({ bankLineId, status, proposals }: Props) {
         </div>
       ))}
       {error ? <span className="text-[11px] text-negative">{error}</span> : null}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _counterKeySeq = 0;
+function nextCounterKey(): string {
+  _counterKeySeq += 1;
+  return `cl-${_counterKeySeq}`;
+}
+
+/**
+ * First counter line is pre-populated with the absolute bank-line amount
+ * on the side opposite the cash line. That's the single-counter case —
+ * the most common starting point. Operators add more lines from there.
+ *
+ * Subsequent lines (index > 0) start blank so the operator types the
+ * amount; the running-balance indicator updates live.
+ */
+function initialCounterDraft(
+  bankLineAmount: string,
+  existingCount = 0
+): CounterLineDraft {
+  if (existingCount > 0) {
+    return {
+      key: nextCounterKey(),
+      accountCode: "",
+      side: "DEBIT",
+      amount: "",
+      partyCode: "",
+      description: "",
+    };
+  }
+  let amount = "";
+  let side: "DEBIT" | "CREDIT" = "CREDIT";
+  try {
+    const signed = new Decimal(bankLineAmount);
+    if (!signed.isZero()) {
+      amount = signed.abs().toFixed(2);
+      // Counter is opposite the cash side: deposit → cash DR → counter CR.
+      side = signed.isPositive() ? "CREDIT" : "DEBIT";
+    }
+  } catch {
+    // bankLineAmount unparseable — leave blanks; the operator can fix.
+  }
+  return {
+    key: nextCounterKey(),
+    accountCode: "",
+    side,
+    amount,
+    partyCode: "",
+    description: "",
+  };
+}
+
+function BalanceIndicator({
+  totalDr,
+  totalCr,
+  imbalance,
+}: {
+  totalDr: string;
+  totalCr: string;
+  imbalance: string;
+}) {
+  const off = parseFloat(imbalance);
+  const balanced = off === 0;
+  return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <span className="text-ink-500">
+        DR <span className="amount-cell text-ink-700">{totalDr}</span>
+        {" · "}
+        CR <span className="amount-cell text-ink-700">{totalCr}</span>
+      </span>
+      <Badge tone={balanced ? "positive" : "warning"}>
+        {balanced
+          ? "balanced ✓"
+          : `off by ${Math.abs(off).toFixed(2)} ${off > 0 ? "DR" : "CR"}`}
+      </Badge>
     </div>
   );
 }

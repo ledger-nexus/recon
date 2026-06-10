@@ -8,17 +8,32 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDate, formatMoney } from "@/lib/utils/format";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function DashboardPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope every dashboard
+  // aggregate. Without these filters, the metric tiles + recent-
+  // statements list would pull from every tenant in the DB.
+  const tenant = await getCurrentTenant();
+  const statementWhere = tenant
+    ? { bankAccount: { entity: { tenantId: tenant.id } } }
+    : { id: "__none__" };
+  const lineWhere = tenant
+    ? { statement: { bankAccount: { entity: { tenantId: tenant.id } } } }
+    : { id: "__none__" };
+  const bankAccountWhere = tenant
+    ? { entity: { tenantId: tenant.id } }
+    : { id: "__none__" };
   const [statements, unmatchedCount, totalLines, accounts] = await Promise.all([
     prisma.bankStatement.findMany({
+      where: statementWhere,
       orderBy: { uploadedAt: "desc" },
       take: 10,
       include: { bankAccount: { select: { displayName: true, code: true } } },
     }),
-    prisma.bankStatementLine.count({ where: { status: "UNMATCHED" } }),
-    prisma.bankStatementLine.count(),
-    prisma.bankAccount.count(),
+    prisma.bankStatementLine.count({ where: { ...lineWhere, status: "UNMATCHED" } }),
+    prisma.bankStatementLine.count({ where: lineWhere }),
+    prisma.bankAccount.count({ where: bankAccountWhere }),
   ]);
 
   if (statements.length === 0 && accounts === 0) {

@@ -28,6 +28,7 @@
 // to set up Clerk before they can touch the write surface.
 
 import { prisma } from "@/lib/db";
+import type { TenantRole } from "@prisma/client";
 
 export interface CurrentUser {
   /** The user's id in the shared app_user table. */
@@ -40,7 +41,12 @@ export interface CurrentTenant {
   id: string;
   slug: string;
   name: string;
-  role: string;
+  /** Role of the current user in this tenant. See src/lib/auth/policy.ts. */
+  role: TenantRole;
+  /** Stripe plan key ("free" / "starter" / "growth" / "scale"). Null when no subscription. */
+  billingPlan: string | null;
+  /** Stripe subscription status ("active" / "trialing" / etc). Null when none. */
+  subscriptionStatus: string | null;
 }
 
 export class NotAuthenticatedError extends Error {
@@ -95,7 +101,17 @@ export async function getCurrentTenant(): Promise<CurrentTenant | null> {
   if (!user) return null;
   const memberships = await prisma.tenantMembership.findMany({
     where: { userId: user.id },
-    include: { tenant: { select: { id: true, slug: true, name: true } } },
+    include: {
+      tenant: {
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          billingPlan: true,
+          subscriptionStatus: true,
+        },
+      },
+    },
   });
   if (memberships.length !== 1) return null;
   const m = memberships[0];
@@ -104,6 +120,8 @@ export async function getCurrentTenant(): Promise<CurrentTenant | null> {
     slug: m.tenant.slug,
     name: m.tenant.name,
     role: m.role,
+    billingPlan: m.tenant.billingPlan,
+    subscriptionStatus: m.tenant.subscriptionStatus,
   };
 }
 

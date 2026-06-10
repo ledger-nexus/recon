@@ -6,9 +6,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function BankAccountsPage() {
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the enumeration.
+  // Without this, the list would expose every tenant's bank account
+  // names, last 4 digits, and linked ledger-core account codes.
+  const tenant = await getCurrentTenant();
   const accounts = await prisma.bankAccount.findMany({
+    where: tenant ? { entity: { tenantId: tenant.id } } : { id: "__none__" },
     orderBy: { code: "asc" },
     include: {
       entity: { select: { code: true, name: true } },

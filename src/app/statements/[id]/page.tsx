@@ -16,16 +16,34 @@ import { Badge } from "@/components/ui/badge";
 import { formatDate, formatMoney, moneyClass } from "@/lib/utils/format";
 import { LineActions, type ProposalView } from "./line-actions";
 import { StatementBulkActions } from "./bulk-actions";
+import { ReconcileButton, ReopenButton } from "./lock-actions";
+import { canViewAdminPages } from "@/lib/auth/policy";
+import { getCurrentTenant } from "@/lib/auth/session";
 
 export default async function StatementDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const statement = await prisma.bankStatement.findUnique({
-    where: { id: params.id },
+  // SECURITY (pen-test pass 4 follow-up): tenant-scope the read.
+  // Without this, a signed-in user could navigate to /statements/[any-id]
+  // and read every bank line on another tenant's statement — including
+  // descriptions (merchant names, transfer memos) and amounts. The page
+  // also embeds the full rawPayload via the bank statement record.
+  const tenant = await getCurrentTenant();
+  if (!tenant) notFound();
+  const statement = await prisma.bankStatement.findFirst({
+    where: { id: params.id, bankAccount: { entity: { tenantId: tenant.id } } },
     include: {
-      bankAccount: { select: { displayName: true, code: true } },
+      bankAccount: {
+        select: {
+          displayName: true,
+          code: true,
+          // The cash GL account code is needed by the multi-line
+          // adjustment editor to render its fixed "Cash" row.
+          account: { select: { code: true } },
+        },
+      },
       lines: {
         orderBy: { lineNo: "asc" },
         include: {
@@ -80,6 +98,8 @@ export default async function StatementDetailPage({
   const percentResolved =
     totalLines === 0 ? 100 : Math.round((resolvedCount / totalLines) * 100);
   const fullyResolved = totalLines > 0 && resolvedCount === totalLines;
+  const isLocked = statement.status === "RECONCILED";
+  const isAdmin = tenant ? canViewAdminPages(tenant.role) : false;
 
   return (
     <div className="flex flex-col gap-6">
@@ -92,6 +112,26 @@ export default async function StatementDetailPage({
           {statement.bankAccount.displayName} ({statement.bankAccount.code}) · {formatDate(statement.periodStart)} → {formatDate(statement.periodEnd)} · {statement.totalLines} lines
         </p>
       </div>
+
+      {isLocked && (
+        <Card>
+          <CardContent className="flex items-start justify-between gap-3 px-5 py-3 bg-emerald-50">
+            <div>
+              <div className="text-sm font-medium text-emerald-900">
+                RECONCILED · locked
+              </div>
+              <p className="mt-0.5 text-xs text-emerald-700">
+                Every mutation on this statement (suggest / approve / reject /
+                ignore / adjustment) is refused.
+                {statement.reconciledAt
+                  ? ` Locked by ${statement.reconciledBy ?? "(unknown)"} on ${formatDate(statement.reconciledAt)}.`
+                  : ""}
+              </p>
+            </div>
+            {isAdmin && <ReopenButton statementId={statement.id} />}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardContent className="grid grid-cols-2 gap-4 px-5 py-4 sm:grid-cols-4">
@@ -117,9 +157,10 @@ export default async function StatementDetailPage({
                 <span className="text-[11px] font-medium uppercase tracking-wider text-ink-500">
                   Progress
                 </span>
-                {fullyResolved && (
+                {fullyResolved && !isLocked && (
                   <Badge tone="positive">All resolved</Badge>
                 )}
+                {isLocked && <Badge tone="positive">LOCKED</Badge>}
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-2xl font-semibold tabular-nums text-ink-900">
@@ -130,10 +171,21 @@ export default async function StatementDetailPage({
                 </span>
               </div>
             </div>
-            <StatementBulkActions
-              statementId={statement.id}
-              unmatchedCount={counts.unmatched}
-            />
+            <div className="flex items-start gap-2">
+              {/* Reconcile button: show when fully resolved + not yet
+                  locked. Bulk-actions hidden when locked (mutations
+                  refuse anyway). */}
+              {fullyResolved && !isLocked && (
+                <ReconcileButton statementId={statement.id} />
+              )}
+              {!isLocked && (
+                <StatementBulkActions
+                  statementId={statement.id}
+                  unmatchedCount={counts.unmatched}
+                  proposedCount={counts.proposed}
+                />
+              )}
+            </div>
           </div>
           {/* Progress bar — width driven by percentResolved. */}
           <div className="h-2 w-full overflow-hidden rounded-full bg-ink-100">
@@ -241,6 +293,8 @@ export default async function StatementDetailPage({
                         bankLineId={line.id}
                         status={line.status}
                         proposals={proposals.filter((p) => p.source !== "MANUAL" || line.status === "PROPOSED")}
+                        bankLineAmount={line.amount.toString()}
+                        cashAccountCode={statement.bankAccount.account.code}
                       />
                     </TD>
                   </TR>

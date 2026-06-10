@@ -29,6 +29,23 @@ import {
   getAiMatchSuggestions,
   type AiSuggestionResult,
 } from "@/lib/matching/ai-suggest";
+import {
+  requireCurrentUser,
+  requireCurrentTenant,
+  NotAuthenticatedError,
+  NoTenantSelectedError,
+} from "@/lib/auth/session";
+import {
+  enforceAiBudget,
+  emitSpendAlertIfThresholdCrossed,
+  RateLimitExceededError,
+  MonthlySpendCapExceededError,
+} from "@/lib/auth/ai-budget";
+import {
+  assertStatementOpen,
+  StatementReconciledError,
+  StatementNotFoundError,
+} from "@/lib/statement-lock";
 
 // Below this AI-confidence, we still log the suggestion but don't create
 // a PROPOSED match row — too noisy for the human approval queue.
@@ -51,8 +68,21 @@ export async function proposeMatchesAction(
   bankLineId: string
 ): Promise<ProposeMatchesState> {
   try {
-    const bankLine = await prisma.bankStatementLine.findUnique({
-      where: { id: bankLineId },
+    // SECURITY (pen-test pass 4 follow-up): require auth + tenant. This
+    // action calls the Anthropic API (per-tenant cost) and writes an
+    // audit row, so anonymous callers must be refused. Tenant-scoping
+    // the bankLine lookup prevents cross-tenant AI invocations.
+    const user = await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+
+    // Refuse if the statement is RECONCILED (admin must reopen first).
+    await assertStatementOpen(prisma, { tenantId: tenant.id, bankLineId });
+
+    const bankLine = await prisma.bankStatementLine.findFirst({
+      where: {
+        id: bankLineId,
+        statement: { bankAccount: { entity: { tenantId: tenant.id } } },
+      },
       select: {
         id: true,
         amount: true,
@@ -92,10 +122,19 @@ export async function proposeMatchesAction(
     const deterministicTop = ranked[0];
     const needAi = deterministicTop.score < AUTO_PROPOSE_THRESHOLD;
 
-    // AI pass (only when deterministic isn't already confident).
+    // AI pass (only when deterministic isn't already confident). The
+    // rate-limit + spend-cap gate fires HERE, not at the top of the
+    // action — purely-deterministic paths don't burn a slot, and the
+    // bulk runner can chew through dozens of lines without tripping
+    // the cap when most are obvious matches.
     let aiResult: AiSuggestionResult | null = null;
     if (needAi) {
       try {
+        await enforceAiBudget({
+          tenantId: tenant.id,
+          userId: user.id,
+          action: "proposeMatches",
+        });
         aiResult = await getAiMatchSuggestions(
           {
             amount: bankAmount,
@@ -105,8 +144,14 @@ export async function proposeMatchesAction(
           candidateRows
         );
       } catch (e) {
-        // AI failure is non-fatal — we still have the deterministic top
-        // match. Log and continue.
+        // Re-throw budget errors so the outer catch surfaces them to
+        // the UI — silently skipping a cap-blocked call would just look
+        // like "no AI proposals" with no signal to the user.
+        if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError) {
+          throw e;
+        }
+        // Other AI failures are non-fatal — we still have the
+        // deterministic top match. Log and continue.
         console.error("AI suggester failed for bank line", bankLineId, e);
       }
     }
@@ -116,6 +161,7 @@ export async function proposeMatchesAction(
       await prisma.aiSuggestion.create({
         data: {
           bankLineId,
+          tenantId: tenant.id,
           candidatesJson: aiResult.candidates as unknown as object,
           modelName: aiResult.modelName,
           promptHash: aiResult.promptHash || null,
@@ -124,6 +170,11 @@ export async function proposeMatchesAction(
           latencyMs: aiResult.latencyMs,
         },
       });
+      // Evaluate spend-threshold alerts after the just-finished call is
+      // included in the tally. In the bulk action this fires once per
+      // line — but the helper's per-month dedup row keeps that to at
+      // most one alert delivery per threshold per calendar month.
+      await emitSpendAlertIfThresholdCrossed(tenant.id);
     }
 
     // Assemble proposals. Deterministic top always wins a slot if its
@@ -225,6 +276,14 @@ export async function proposeMatchesAction(
         : undefined,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in.", bankLineId };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message, bankLineId };
+    if (e instanceof RateLimitExceededError || e instanceof MonthlySpendCapExceededError)
+      return { ok: false, message: e.message, bankLineId };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
+      return { ok: false, message: e.message, bankLineId };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error",
@@ -260,8 +319,22 @@ export async function proposeAllUnmatchedAction(
   statementId: string
 ): Promise<ProposeAllState> {
   try {
+    // SECURITY (pen-test pass 4 follow-up): same gate as
+    // proposeMatchesAction. The per-line invocation inside the loop
+    // also re-checks, but failing fast here saves a DB query when the
+    // caller isn't authorized.
+    await requireCurrentUser();
+    const tenant = await requireCurrentTenant();
+    // Refuse if the statement is RECONCILED — same gate as the
+    // single-line action.
+    await assertStatementOpen(prisma, { tenantId: tenant.id, statementId });
+
     const lines = await prisma.bankStatementLine.findMany({
-      where: { statementId, status: "UNMATCHED" },
+      where: {
+        statementId,
+        status: "UNMATCHED",
+        statement: { bankAccount: { entity: { tenantId: tenant.id } } },
+      },
       select: { id: true },
       orderBy: { lineNo: "asc" },
     });
@@ -281,11 +354,23 @@ export async function proposeAllUnmatchedAction(
     let noCandidates = 0;
     let belowThreshold = 0;
     let errors = 0;
+    let budgetStopped = false;
 
     for (const line of lines) {
       const result = await proposeMatchesAction(line.id);
       if (!result.ok) {
         errors += 1;
+        // If the budget tripped on this line, every subsequent call
+        // will also be refused — short-circuit the loop to spare the
+        // DB round-trips and give the user one clear message.
+        if (
+          result.message.includes("Tenant rate limit") ||
+          result.message.includes("User rate limit") ||
+          result.message.includes("spend cap")
+        ) {
+          budgetStopped = true;
+          break;
+        }
         continue;
       }
       // The single-line action's `message` distinguishes the buckets.
@@ -308,6 +393,7 @@ export async function proposeAllUnmatchedAction(
     if (noCandidates > 0) parts.push(`${noCandidates} with no candidates`);
     if (belowThreshold > 0) parts.push(`${belowThreshold} below threshold`);
     if (errors > 0) parts.push(`${errors} errored`);
+    if (budgetStopped) parts.push("stopped early at AI budget limit");
     const summary = parts.length > 0 ? parts.join(", ") : "no changes";
 
     return {
@@ -320,6 +406,12 @@ export async function proposeAllUnmatchedAction(
       errors,
     };
   } catch (e) {
+    if (e instanceof NotAuthenticatedError)
+      return { ok: false, message: "You must be signed in." };
+    if (e instanceof NoTenantSelectedError)
+      return { ok: false, message: e.message };
+    if (e instanceof StatementReconciledError || e instanceof StatementNotFoundError)
+      return { ok: false, message: e.message };
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Unknown error",

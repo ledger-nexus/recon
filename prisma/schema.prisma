@@ -33,15 +33,15 @@ datasource db {
 // =========================================================================
 
 model LegalEntity {
-  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id                   String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Phase 4b in ledger-core: code is unique per [tenantId, code], not globally.
   // SECURITY (pen-test pass 4): tenantId added so Server Actions can
   // tenant-scope their record lookups. The column exists in the shared
   // DB; declaring it here lets recon's Prisma client filter by it.
-  tenantId             String   @db.Uuid
+  tenantId             String  @db.Uuid
   code                 String
   name                 String
-  parentEntityId       String?  @db.Uuid
+  parentEntityId       String? @db.Uuid
   functionalCurrencyId String
   sourceSystem         String?
   sourceRecordType     String?
@@ -52,6 +52,7 @@ model LegalEntity {
 
   journalEntries JournalEntry[]
   bankAccounts   BankAccount[]
+  parties        Party[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -77,19 +78,19 @@ model Book {
 }
 
 model Account {
-  id               String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId         String? @db.Uuid
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId         String?       @db.Uuid
   code             String
   name             String
   type             AccountType
   normalBalance    NormalBalance
   subtype          String?
-  isContra         Boolean @default(false)
-  isControlAccount Boolean @default(false)
-  isBank           Boolean @default(false)
-  parentAccountId  String? @db.Uuid
-  bookScope        String[] @default([])
-  active           Boolean @default(true)
+  isContra         Boolean       @default(false)
+  isControlAccount Boolean       @default(false)
+  isBank           Boolean       @default(false)
+  parentAccountId  String?       @db.Uuid
+  bookScope        String[]      @default([])
+  active           Boolean       @default(true)
 
   lines        JournalLine[]
   bankAccounts BankAccount[]
@@ -110,10 +111,22 @@ model Account {
 
 model Party {
   id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId      String? @db.Uuid
+  // SOC 2 CC6.1: Party carries tenantId at the column level in the shared
+  // DB (ledger-core owns the schema). Declaring it here lets recon's
+  // queries that traverse JournalLine.party tenant-scope explicitly when
+  // the call site has the actor tenant in hand. Backrefs other than
+  // JournalLine (PartyRole, ArOpenItem, ApOpenItem, RevenueContract,
+  // FixedAsset, Lease) are omitted on purpose — recon doesn't model
+  // those tables.
+  tenantId      String  @db.Uuid
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId      String? @db.Uuid // null = shared across entities
+  entity        LegalEntity? @relation(fields: [entityId], references: [id])
   code          String
   displayName   String
   parentPartyId String? @db.Uuid
+  parent        Party?  @relation("PartyHierarchy", fields: [parentPartyId], references: [id])
+  children      Party[] @relation("PartyHierarchy")
 
   journalLines JournalLine[]
 
@@ -128,27 +141,28 @@ model Party {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
   @@map("party")
 }
 
 model JournalEntry {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
   // No tenantId in this mirror; drop @unique, callers use findFirst.
-  entryNumber   String
-  entityId      String   @db.Uuid
-  entity        LegalEntity @relation(fields: [entityId], references: [id])
-  bookId        String   @db.Uuid
-  book          Book        @relation(fields: [bookId], references: [id])
-  periodId      String?  @db.Uuid
-  documentDate  DateTime @db.Date
-  postingDate   DateTime @db.Date
-  memo          String
-  currencyId    String
-  fxRate        Decimal  @default(1) @db.Decimal(20, 10)
-  source        JournalSource @default(MANUAL)
-  status        EntryStatus   @default(POSTED)
-  reversalOfId  String?  @db.Uuid
+  entryNumber  String
+  entityId     String        @db.Uuid
+  entity       LegalEntity   @relation(fields: [entityId], references: [id])
+  bookId       String        @db.Uuid
+  book         Book          @relation(fields: [bookId], references: [id])
+  periodId     String?       @db.Uuid
+  documentDate DateTime      @db.Date
+  postingDate  DateTime      @db.Date
+  memo         String
+  currencyId   String
+  fxRate       Decimal       @default(1) @db.Decimal(20, 10)
+  source       JournalSource @default(MANUAL)
+  status       EntryStatus   @default(POSTED)
+  reversalOfId String?       @db.Uuid
 
   sourceSystem     String?
   sourceRecordType String?
@@ -170,12 +184,12 @@ model JournalEntry {
 }
 
 model JournalLine {
-  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entryId   String @db.Uuid
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId   String       @db.Uuid
   entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
   lineNo    Int
-  accountId String @db.Uuid
-  account   Account @relation(fields: [accountId], references: [id])
+  accountId String       @db.Uuid
+  account   Account      @relation(fields: [accountId], references: [id])
 
   partyId        String? @db.Uuid
   party          Party?  @relation(fields: [partyId], references: [id])
@@ -210,20 +224,20 @@ model JournalLine {
 // The link to ledger-core is via accountId (must point to an Account
 // where isBank=true).
 model BankAccount {
-  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId      String  @db.Uuid
-  entity        LegalEntity @relation(fields: [entityId], references: [id])
-  accountId     String  @db.Uuid
-  account       Account     @relation(fields: [accountId], references: [id])
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entityId  String      @db.Uuid
+  entity    LegalEntity @relation(fields: [entityId], references: [id])
+  accountId String      @db.Uuid
+  account   Account     @relation(fields: [accountId], references: [id])
 
-  code          String  @unique  // human-readable, e.g. "CHASE-OPERATING"
-  displayName   String
-  bankName      String?
+  code               String  @unique // human-readable, e.g. "CHASE-OPERATING"
+  displayName        String
+  bankName           String?
   accountNumberLast4 String?
-  currencyId    String  @default("USD")
-  isActive      Boolean @default(true)
+  currencyId         String  @default("USD")
+  isActive           Boolean @default(true)
 
-  statements    BankStatement[]
+  statements BankStatement[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -232,58 +246,100 @@ model BankAccount {
 }
 
 model BankStatement {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  bankAccountId   String   @db.Uuid
-  bankAccount     BankAccount @relation(fields: [bankAccountId], references: [id])
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankAccountId String      @db.Uuid
+  bankAccount   BankAccount @relation(fields: [bankAccountId], references: [id])
 
   // Source metadata
-  filename        String
-  uploadedAt      DateTime @default(now())
-  uploadedBy      String?
-  format          String   // e.g. "CHASE_CSV_V1", "BOFA_OFX", "GENERIC_CSV"
-  rawPayload      String   // verbatim file content for audit / re-parse
+  filename   String
+  uploadedAt DateTime @default(now())
+  uploadedBy String?
+  format     String // e.g. "CHASE_CSV_V1", "BOFA_OFX", "GENERIC_CSV"
+  rawPayload String // verbatim file content for audit / re-parse
 
   // Statement period
-  periodStart     DateTime @db.Date
-  periodEnd       DateTime @db.Date
-  openingBalance  Decimal  @db.Decimal(18, 4)
-  closingBalance  Decimal  @db.Decimal(18, 4)
+  periodStart    DateTime @db.Date
+  periodEnd      DateTime @db.Date
+  openingBalance Decimal  @db.Decimal(18, 4)
+  closingBalance Decimal  @db.Decimal(18, 4)
 
-  lines           BankStatementLine[]
+  lines BankStatementLine[]
 
   // Aggregate status for the UI
-  totalLines        Int @default(0)
-  matchedLines      Int @default(0)
-  pendingLines      Int @default(0)
+  totalLines   Int @default(0)
+  matchedLines Int @default(0)
+  pendingLines Int @default(0)
+
+  // ─── Statement-level lock (v1.1) ──────────────────────────────────
+  //
+  // OPEN       — default; mutations (propose / decide / ignore /
+  //              adjustment) are accepted normally
+  // RECONCILED — frozen; all mutating actions refuse until an admin
+  //              reopens. Set by reconcileStatementAction once 100% of
+  //              the lines resolve (matched + ignored + adjustment).
+  //
+  // reconciledAt + reconciledBy are stamped on the transition.
+  // Reopening clears them so a re-locked statement reflects the
+  // latest run, not the original.
+  status       BankStatementStatus @default(OPEN)
+  reconciledAt DateTime?
+  reconciledBy String? // user email/displayName at reconcile time
 
   @@index([bankAccountId, periodEnd])
+  @@index([bankAccountId, status])
   @@map("bank_statement")
 }
 
-model BankStatementLine {
-  id            String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  statementId   String @db.Uuid
-  statement     BankStatement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+enum BankStatementStatus {
+  OPEN
+  RECONCILED
+}
 
-  lineNo        Int    // 1-based order within the statement
-  transactionDate DateTime @db.Date
+model BankStatementLine {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  statementId String        @db.Uuid
+  statement   BankStatement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+
+  lineNo          Int // 1-based order within the statement
+  transactionDate DateTime  @db.Date
   postedDate      DateTime? @db.Date
   description     String
   // Signed: positive = deposit / inflow, negative = withdrawal / outflow.
   // Storing signed keeps the SUM(lines) = closingBalance - openingBalance
   // invariant trivial to assert.
-  amount        Decimal @db.Decimal(18, 4)
-  runningBalance Decimal? @db.Decimal(18, 4)
-  externalRef   String?  // bank's own transaction id when available
+  amount          Decimal   @db.Decimal(18, 4)
+  runningBalance  Decimal?  @db.Decimal(18, 4)
+  externalRef     String? // bank's own transaction id when available
 
-  status        BankLineStatus @default(UNMATCHED)
+  status BankLineStatus @default(UNMATCHED)
 
   // Audit trail for IGNORED status (v1.0). Populated when a human
   // marks the line IGNORED via ignoreLineAction; preserved across
   // un-ignore so the full history survives. Null for non-IGNORED lines.
-  ignoredAt     DateTime?
-  ignoredBy     String?
-  ignoreReason  String?
+  ignoredAt    DateTime?
+  ignoredBy    String?
+  ignoreReason String?
+
+  // Audit trail for MODIFIED upstream corrections (v1.2). When the
+  // bank corrects a transaction (gas-pump pre-auth → actual fillup,
+  // restaurant tip adjustment), integrations sends a modify signal
+  // via /api/internal/bank-lines and we update amount/description
+  // in place. These columns track the most-recent modification.
+  // Status stays at whatever it was — the operator needs to
+  // re-review matched lines whose amounts changed.
+  modifiedAt DateTime?
+  modifiedBy String?
+
+  // Audit trail for VOID status (v1.2). Populated when the upstream
+  // bank says a transaction was cancelled/reversed and integrations
+  // sends a remove signal. We never delete the row — voided lines
+  // stay visible in the statement for the audit history. Any
+  // PROPOSED matches get withdrawn; APPROVED matches are flagged
+  // (the JE may need manual reversal, but recon can't do that
+  // without operator action).
+  voidedAt   DateTime?
+  voidedBy   String?
+  voidReason String?
 
   matches       ReconciliationMatch[]
   aiSuggestions AiSuggestion[]
@@ -291,43 +347,47 @@ model BankStatementLine {
   @@unique([statementId, lineNo])
   @@index([statementId, status])
   @@index([transactionDate])
+  // External-ref lookup index — used by the bank-lines endpoint's
+  // modify + remove paths to find the line by Plaid's transaction_id.
+  @@index([externalRef])
   @@map("bank_statement_line")
 }
 
 enum BankLineStatus {
-  UNMATCHED       // no match proposed yet
-  PROPOSED        // a match has been suggested (deterministic or AI)
-  MATCHED         // human approved the match
-  IGNORED         // human marked as not requiring reconciliation
-  ADJUSTMENT      // human posted an adjustment JE to resolve the line
+  UNMATCHED // no match proposed yet
+  PROPOSED // a match has been suggested (deterministic or AI)
+  MATCHED // human approved the match
+  IGNORED // human marked as not requiring reconciliation
+  ADJUSTMENT // human posted an adjustment JE to resolve the line
+  VOID // upstream bank cancelled/reversed the transaction
 }
 
 // Bridges a BankStatementLine to a JournalLine via ledger-core. One bank
 // line can match one or more JE lines (e.g. split deposits); one JE line
 // can be matched by one bank line (a single deposit clearing).
 model ReconciliationMatch {
-  id                String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  bankLineId        String @db.Uuid
-  bankLine          BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
-  journalLineId     String @db.Uuid
-  journalLine       JournalLine @relation("MatchedJournalLine", fields: [journalLineId], references: [id])
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankLineId    String            @db.Uuid
+  bankLine      BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
+  journalLineId String            @db.Uuid
+  journalLine   JournalLine       @relation("MatchedJournalLine", fields: [journalLineId], references: [id])
 
   // Match source — drives the UI badge color.
-  source            MatchSource
-  confidence        Decimal? @db.Decimal(5, 4)  // 0.00..1.00 from AI; null for deterministic / manual
-  status            MatchStatus @default(PROPOSED)
+  source     MatchSource
+  confidence Decimal?    @db.Decimal(5, 4) // 0.00..1.00 from AI; null for deterministic / manual
+  status     MatchStatus @default(PROPOSED)
 
   // If recon posted an adjustment JE (e.g. for an unbooked bank fee),
   // the resulting ledger-core entry id lives here. The JE itself is
   // posted via ledger-core's postJournalEntry with source="AI_APPROVED"
   // or "MANUAL".
-  appliedByEntryId  String? @db.Uuid
-  appliedByEntry    JournalEntry? @relation("AppliedByReconEntry", fields: [appliedByEntryId], references: [id])
+  appliedByEntryId String?       @db.Uuid
+  appliedByEntry   JournalEntry? @relation("AppliedByReconEntry", fields: [appliedByEntryId], references: [id])
 
-  approvedAt        DateTime?
-  approvedBy        String?
-  rejectedAt        DateTime?
-  rejectedBy        String?
+  approvedAt DateTime?
+  approvedBy String?
+  rejectedAt DateTime?
+  rejectedBy String?
 
   createdAt DateTime @default(now())
 
@@ -338,8 +398,8 @@ model ReconciliationMatch {
 
 enum MatchSource {
   DETERMINISTIC // amount + date + counterparty heuristic
-  AI            // proposed by the AI suggester
-  MANUAL        // human-drawn link
+  AI // proposed by the AI suggester
+  MANUAL // human-drawn link
 }
 
 enum MatchStatus {
@@ -353,25 +413,120 @@ enum MatchStatus {
 // keep the model's reasoning + confidence even when it's rejected. This
 // is the audit trail for "did the AI suggest something useful here?"
 model AiSuggestion {
-  id              String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  bankLineId      String @db.Uuid
-  bankLine        BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bankLineId String            @db.Uuid
+  bankLine   BankStatementLine @relation(fields: [bankLineId], references: [id], onDelete: Cascade)
+
+  // SECURITY (pen-test pass 4 follow-up): tenantId stamped on every new
+  // row so the audit page can filter without joining through
+  // bankLine.statement.bankAccount.entity. Nullable because legacy rows
+  // (created before this column was added) don't have a value; the page
+  // queries filter null rows out — they're treated as untrusted/legacy.
+  // Backfill SQL lives in prisma/backfill-ai-suggestion-tenant.sql.
+  tenantId String? @db.Uuid
+  tenant   Tenant? @relation(fields: [tenantId], references: [id])
 
   // Candidates as a JSON array of { journalLineId, confidence, rationale }
   // in descending confidence order. Stored as JSON because the shape may
   // evolve as the prompt evolves.
-  candidatesJson  Json
+  candidatesJson Json
 
-  modelName       String   // e.g. "claude-haiku-4-5"
-  promptHash      String?  // SHA of prompt for cache-hit analytics
-  promptTokens    Int?
+  modelName        String // e.g. "claude-haiku-4-5"
+  promptHash       String? // SHA of prompt for cache-hit analytics
+  promptTokens     Int?
   completionTokens Int?
-  latencyMs       Int?
+  latencyMs        Int?
 
   createdAt DateTime @default(now())
 
   @@index([bankLineId])
+  @@index([tenantId, createdAt])
   @@map("ai_suggestion")
+}
+
+// Heavy users of recon (CPAs running monthly closes for many clients)
+// build up an internal library of "I know what this is" patterns —
+// "STRIPE PAYOUT*" deposits always clear against AR collections, "ZELLE
+// FROM JOHN" is the owner's draw, "ATM WITHDRAWAL" is petty cash. A
+// MatchingRule lets them codify each pattern once and apply it across
+// future statements:
+//
+//   - describeRegex (case-insensitive) matches the bank line description
+//   - optional amount range narrows further (e.g., > $1k)
+//   - actionType says what to do: IGNORE the line, or ADJUST (post a
+//     balanced JE against counterAccountCode with a memo template)
+//
+// Priority controls match order when multiple rules could match a line —
+// lower number = higher priority. First match wins; the rest are tried
+// only on lines no rule has claimed.
+//
+// Tracking: each application increments `applicationCount` so the
+// operator can spot dead rules (low count = pattern never recurs) and
+// trusted ones (high count = mature, vetted). lastAppliedAt + the
+// per-statement Server Action's report gives the audit trail.
+//
+// Why recon-owned (not ledger-core):
+//   - Rules describe how recon classifies bank lines — pure recon UX.
+//   - They don't affect ledger-core's posting logic; the JE that
+//     ultimately posts goes through the same bridge as any human-
+//     typed adjustment.
+//   - Deleting recon never touches ledger-core's substrate.
+model MatchingRule {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// Tenant this rule belongs to. Required — rules are never shared
+  /// across tenants (one bookkeeper's "STRIPE PAYOUT" mapping is
+  /// another's nightmare).
+  tenantId String  @db.Uuid
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// Optional entity scope. Null = applies to all entities in the
+  /// tenant; populated = only this entity. Useful when one tenant
+  /// has multiple legal entities with different chart of accounts.
+  entityId String? @db.Uuid
+
+  name             String // operator-facing label ("Stripe payouts → AR")
+  /// Regex matched (case-insensitive, anchored none) against
+  /// BankStatementLine.description. We compile + cache with a per-
+  /// application timeout to prevent ReDoS.
+  descriptionRegex String
+  /// Optional amount filter — both inclusive, sign matters. Use signed
+  /// values: positive = deposits, negative = withdrawals. Pair with a
+  /// regex to disambiguate (e.g., regex matches both deposit + refund
+  /// for the same merchant; amountMin filters to only deposits).
+  amountMin        Decimal? @db.Decimal(18, 4)
+  amountMax        Decimal? @db.Decimal(18, 4)
+
+  actionType         MatchingRuleAction
+  /// Required when actionType = ADJUST. The non-cash side of the JE.
+  counterAccountCode String?
+  /// Optional template; `{description}` and `{date}` interpolate.
+  /// Falls back to "Auto-classified via rule '{name}'" when null.
+  memoTemplate       String?
+  /// Optional party code for the counter line (typically when the
+  /// rule represents a recurring customer / vendor relationship).
+  partyCode          String?
+
+  /// Lower number = applied first. Two rules with the same priority
+  /// resolve by `name` lexicographic.
+  priority Int     @default(100)
+  isActive Boolean @default(true)
+
+  /// Tracking — increments every successful application.
+  applicationCount Int       @default(0)
+  lastAppliedAt    DateTime?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, isActive, priority])
+  @@map("matching_rule")
+}
+
+enum MatchingRuleAction {
+  /// Mark the line IGNORED with the rule's name as the reason.
+  IGNORE
+  /// Post a two-line cash/counter adjustment JE via the bridge.
+  ADJUST
 }
 
 // =========================================================================
@@ -427,32 +582,98 @@ enum EntryStatus {
 // recon. The tables already exist in the DB; no migration needed.
 
 model User {
-  id          String  @id @db.Uuid
-  email       String  @unique
+  id          String             @id @db.Uuid
+  email       String             @unique
   displayName String
-  isActive    Boolean @default(true)
+  isActive    Boolean            @default(true)
   memberships TenantMembership[]
 
   @@map("app_user")
 }
 
 model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
+  id                   String             @id @db.Uuid
+  slug                 String             @unique
+  name                 String
+  /// See ledger-core's Tenant.monthlyAiSpendCapUsd. Read-only here;
+  /// recon never writes this column.
+  monthlyAiSpendCapUsd Decimal?           @db.Decimal(10, 2)
+  /// Mirror of ledger-core's Tenant.billingPlan. Read-only.
+  /// recon's session.requireRepoAccess() reads this to gate access by plan.
+  billingPlan          String?
+  /// Mirror of ledger-core's Tenant.subscriptionStatus.
+  /// "active" / "trialing" → use billingPlan; everything else falls
+  /// back to free tier.
+  subscriptionStatus   String?
+  memberships          TenantMembership[]
+  aiSuggestions        AiSuggestion[]
+  rateLimitEvents      RateLimitEvent[]
+  aiSpendAlerts        AiSpendAlert[]
+  matchingRules        MatchingRule[]
+  parties              Party[]
 
   @@map("tenant")
 }
 
+/// Spend-threshold alerts. See src/lib/auth/ai-budget.ts. Mirror of
+/// fa-amort + revenue-rec's table; recon tracks its own Haiku match
+/// spend independently.
+model AiSpendAlert {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  /// Source repo — part of the unique constraint so each repo dedupes
+  /// its own crossings independently. See fa-amort's schema for the
+  /// full rationale.
+  source    String
+  monthKey  String
+  threshold Int
+  capUsd    Decimal  @db.Decimal(10, 2)
+  spentUsd  Decimal  @db.Decimal(10, 2)
+  sentAt    DateTime @default(now())
+
+  @@unique([tenantId, source, monthKey, threshold])
+  @@index([tenantId, sentAt])
+  @@map("ai_spend_alert")
+}
+
+/// Per-action rate-limit ledger. See src/lib/auth/ai-budget.ts.
+/// Mirrors fa-amort + revenue-rec; shared concept, per-repo table.
+model RateLimitEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  userId    String?  @db.Uuid
+  action    String
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("rate_limit_event")
+}
+
 model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  /// Mirror of ledger-core's TenantRole enum. Hierarchy:
+  /// OWNER > ADMIN > MEMBER > VIEWER. See src/lib/auth/policy.ts
+  /// for the permission catalog.
+  role     TenantRole @default(MEMBER)
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
   user   User   @relation(fields: [userId], references: [id])
 
   @@unique([tenantId, userId])
   @@map("tenant_membership")
+}
+
+/// Mirror of ledger-core's TenantRole enum. Must stay in sync —
+/// ledger-core's schema is the canonical source. New roles added
+/// upstream must be added here too BEFORE the column-type change
+/// can land.
+enum TenantRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
 }
