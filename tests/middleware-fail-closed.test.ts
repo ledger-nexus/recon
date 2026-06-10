@@ -36,14 +36,16 @@ describe("middleware fail-closed in production", () => {
     Object.assign(process.env, { NODE_ENV: "development" });
     const res = await middleware(reqFor("/statements"));
     // NextResponse.next() returns 200 with no body — the route then handles.
-    expect(res.status).toBe(200);
+    // middleware()'s return is NextResponse | undefined under strict null
+    // checks; it's defined for a non-public route, so assert non-null.
+    expect(res!.status).toBe(200);
   });
 
   it("production without Clerk: REFUSES non-public routes with 503", async () => {
     Object.assign(process.env, { NODE_ENV: "production" });
     const res = await middleware(reqFor("/statements"));
-    expect(res.status).toBe(503);
-    const body = await res.json();
+    expect(res!.status).toBe(503);
+    const body = await res!.json();
     expect(body.ok).toBe(false);
     expect(body.error).toMatch(/CLERK_SECRET_KEY/);
   });
@@ -51,11 +53,11 @@ describe("middleware fail-closed in production", () => {
   it("production without Clerk: STILL serves public routes (sign-in, health)", async () => {
     Object.assign(process.env, { NODE_ENV: "production" });
     const signIn = await middleware(reqFor("/sign-in"));
-    expect(signIn.status).toBe(200);
+    expect(signIn!.status).toBe(200);
     const health = await middleware(reqFor("/api/health"));
-    expect(health.status).toBe(200);
+    expect(health!.status).toBe(200);
     const next = await middleware(reqFor("/_next/static/foo.js"));
-    expect(next.status).toBe(200);
+    expect(next!.status).toBe(200);
   });
 
   it("isPublic matcher covers expected paths", () => {
