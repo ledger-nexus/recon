@@ -17,7 +17,7 @@
     "smoke:ai": "tsx scripts/smoke-test-ai.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "0.65.0",
+    "@anthropic-ai/sdk": "0.104.1",
     "@clerk/nextjs": "6.39.4",
     "@prisma/client": "5.22.0",
     "clsx": "2.1.1",
@@ -40,7 +40,7 @@
     "postcss": "8.5.15",
     "prisma": "5.22.0",
     "tailwindcss": "3.4.19",
-    "tsx": "4.22.3",
+    "tsx": "4.22.4",
     "typescript": "5.9.3",
     "vitest": "2.1.9"
   },
