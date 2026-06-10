@@ -12,6 +12,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient, MatchSource, MatchStatus } from "@prisma/client";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 
 // Sentinel UUIDs for the two test subjects. Stable across runs so
@@ -39,6 +41,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   // Reuse the NORTHWIND seed. The test does not own a tenant chain.
@@ -80,11 +83,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
 
-describe("reconAttribution — integration vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("reconAttribution — integration vs real Postgres", () => {
   it("returns empty-but-valid shape for a user with no recon activity", async () => {
     const { reconAttribution } = await import(
       "@/lib/privacy/recon-attribution"
