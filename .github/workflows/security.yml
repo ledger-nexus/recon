@@ -49,6 +49,15 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
 
   codeql:
+    # Run only where code scanning is available: public repos (free
+    # CodeQL) or a private repo opted in via the ENABLE_CODEQL repo
+    # variable after enabling GitHub Advanced Security. Skip — do not
+    # fail — on a private repo without GHAS, where analyze would 403.
+    # Only skips when we positively detect a private repo, so events
+    # that do not populate the repository object (schedule) still run.
+    # Mirrors ledger-core. NOTE: if codeql becomes a required status
+    # check, a skipped job won't satisfy it — keep it advisory.
+    if: ${{ github.event.repository.private != true || vars.ENABLE_CODEQL == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       security-events: write
