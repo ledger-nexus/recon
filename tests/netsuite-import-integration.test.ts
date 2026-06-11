@@ -20,6 +20,8 @@ import type {
   NsReconExport,
 } from "../src/lib/mappers/netsuite";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 const SUFFIX = "rcint" + Date.now().toString(36);
 
@@ -39,6 +41,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
 
   const entity = await prisma.legalEntity.findFirst({
@@ -76,6 +79,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
@@ -129,7 +133,7 @@ function makeNsExport(opts: {
   };
 }
 
-describe("importFromNsRecon — integration vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("importFromNsRecon — integration vs real Postgres", () => {
   it("creates BankAccount + BankStatement + lines + a MANUAL/APPROVED match end-to-end", async () => {
     const result = await importFromNsRecon(prisma, {
       export: makeNsExport({

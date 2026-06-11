@@ -31,6 +31,8 @@ import type {
   NsReconExport,
 } from "../src/lib/mappers/netsuite";
 
+const HAS_DB = !!process.env.DATABASE_URL;
+
 const prisma = new PrismaClient();
 const SUFFIX = "rxprt" + Date.now().toString(36);
 
@@ -48,6 +50,7 @@ async function cleanup() {
 }
 
 beforeAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   const entity = await prisma.legalEntity.findFirst({
     where: { code: "NORTHWIND" },
@@ -67,6 +70,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   await cleanup();
   await prisma.$disconnect();
 });
@@ -118,7 +122,7 @@ function makeBundle(opts: {
   };
 }
 
-describe("exportToNsRecon — roundtrip proof vs real Postgres", () => {
+describe.skipIf(!HAS_DB)("exportToNsRecon — roundtrip proof vs real Postgres", () => {
   it("imports a bundle, re-exports, and diffNsReconExports returns no statement-level differences", async () => {
     const original = makeBundle({
       bankAccountInternalId: `RXPRT-${SUFFIX}-ba1`,
