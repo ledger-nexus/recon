@@ -33,6 +33,16 @@ The architecture canon is `docs/ARCHITECTURE.md`. Read it before changing how re
 
 4. **Deterministic match scoring stays deterministic.** No model calls inside `src/lib/matching/deterministic.ts`. The AI suggester lives in `src/lib/matching/ai-suggest.ts` (v0.2+) and is invoked separately.
 
+5. **All error emission goes through the monitoring shim.** `src/lib/monitoring/index.ts` is the canonical path — `captureError(err, context)` / `captureMessage(msg, level, context)`. Every emit runs `redactPii()` before the error reaches Sentry or the console fallback. **Never call Sentry directly + never console.error a Prisma/Plaid error's `.message`** — the column-value embedding pattern is real (bank-line descriptions, counterparty names from `BankStatementLine.description` would leak verbatim). The shim's `sanitizeErrorForCapture()` strips the V8 stack preamble so `.message` PII can't leak via `.stack` (14th adversarial pass closure 2026-06-05). Add new field names to `src/lib/soc2/redact-pii.ts` allowlist when new sensitive columns ship.
+
+## SOC 2 + adversarial-pass cadence
+
+This repo is part of the ledger-nexus portfolio's SOC 2 Type 2 readiness program. Current state (per `ledger-core/docs/SOC2_READINESS.md`): **≈80% to Type 1 audit-ready**.
+
+**Adversarial-pass discipline:** every substantive code shipment (NS mapper sprints, AI suggester changes, monitoring code, anything cross-tenant-touching) should be followed by an adversarial-pass audit before merge. The portfolio has run **14 adversarial passes** to date; the 2026-06-05 NS bank-recon sprint (5 PRs end-to-end) was audited inline. The 14th pass found a real HIGH in newly-shipped monitoring code: V8 `Error.stack` embeds `.message` verbatim, so the original redactPii's `.message` redaction was insufficient. Closed via recon PR #24 2nd commit.
+
+The cadence is the evidence: SOC 2 CC4 (Monitoring Activities) auditors grade "this team finds + closes their own weaknesses." A self-discovered HIGH closed in-session with tests pinning the attack scenario is the highest-confidence CC4 evidence form. **When you ship something load-bearing, run an adversarial pass before declaring done.**
+
 ## What's wired (v0.2)
 
 - Bank statement CSV parser with reconciliation check
