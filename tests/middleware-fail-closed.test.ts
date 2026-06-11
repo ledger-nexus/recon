@@ -31,17 +31,33 @@ function reqFor(pathname: string): NextRequest {
   return new NextRequest(`http://localhost${pathname}`);
 }
 
+/**
+ * Middleware's return type is `Response | undefined` (Clerk's wrapper
+ * can return undefined for public routes that don't need a response).
+ * For the fail-closed paths exercised in this suite we DO expect a
+ * concrete response — this helper asserts that and narrows the type
+ * for the rest of the test. A real undefined leak surfaces here as
+ * a clear test failure rather than a tsc workaround.
+ */
+async function expectResponse(
+  p: ReturnType<typeof middleware>
+): Promise<Response> {
+  const r = await p;
+  expect(r).toBeDefined();
+  return r as Response;
+}
+
 describe("middleware fail-closed in production", () => {
   it("development without Clerk: lets non-public routes through (dev convenience)", async () => {
     Object.assign(process.env, { NODE_ENV: "development" });
-    const res = await middleware(reqFor("/statements"));
+    const res = await expectResponse(middleware(reqFor("/statements")));
     // NextResponse.next() returns 200 with no body — the route then handles.
     expect(res.status).toBe(200);
   });
 
   it("production without Clerk: REFUSES non-public routes with 503", async () => {
     Object.assign(process.env, { NODE_ENV: "production" });
-    const res = await middleware(reqFor("/statements"));
+    const res = await expectResponse(middleware(reqFor("/statements")));
     expect(res.status).toBe(503);
     const body = await res.json();
     expect(body.ok).toBe(false);
@@ -50,11 +66,13 @@ describe("middleware fail-closed in production", () => {
 
   it("production without Clerk: STILL serves public routes (sign-in, health)", async () => {
     Object.assign(process.env, { NODE_ENV: "production" });
-    const signIn = await middleware(reqFor("/sign-in"));
+    const signIn = await expectResponse(middleware(reqFor("/sign-in")));
     expect(signIn.status).toBe(200);
-    const health = await middleware(reqFor("/api/health"));
+    const health = await expectResponse(middleware(reqFor("/api/health")));
     expect(health.status).toBe(200);
-    const next = await middleware(reqFor("/_next/static/foo.js"));
+    const next = await expectResponse(
+      middleware(reqFor("/_next/static/foo.js"))
+    );
     expect(next.status).toBe(200);
   });
 
