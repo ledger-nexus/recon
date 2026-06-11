@@ -1,0 +1,14 @@
+# Responsible-disclosure file per RFC 9116.
+#
+# Served at https://<domain>/.well-known/security.txt once domain is
+# provisioned. The same file is staged in the repo so the deployment
+# path is reproducible.
+#
+# Closes deficiency-log #17 (carryover from SOC2_READINESS v1.0
+# medium finding).
+
+Contact: https://github.com/ledger-nexus/recon/security/advisories/new
+Expires: 2027-06-03T00:00:00.000Z
+Preferred-Languages: en
+Policy: https://github.com/ledger-nexus/recon/blob/main/SECURITY.md
+Acknowledgments: https://github.com/ledger-nexus/recon/security/advisories
