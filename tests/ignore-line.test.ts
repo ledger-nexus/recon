@@ -48,7 +48,16 @@ const SUFFIX = "rec" + Date.now().toString(36) + Math.floor(Math.random() * 9999
 let statementId: string;
 let bankLines: { id: string; status: string }[] = [];
 
+// recon's CI is deliberately DB-free (see ci.yml header; "smoke-test
+// against a dev DB in CI" is documented future work). This integration
+// suite needs the shared ledger-core DATABASE_URL, so it SKIPS — not
+// fails — when no DB is configured. It runs in full locally / wherever
+// DATABASE_URL is set. The hooks below early-return for the same reason
+// (a top-level beforeAll runs even when the describes are skipped).
+const HAS_DB = !!process.env.DATABASE_URL;
+
 beforeAll(async () => {
+  if (!HAS_DB) return;
   // Re-use the default tenant + Northwind entity if they exist. We don't
   // create our own — too much setup for what we're testing.
   const entity = await prisma.legalEntity.findFirst({
@@ -125,6 +134,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!HAS_DB) return;
   // Cleanup: cascade should handle lines + matches via the statement FK.
   await prisma.bankStatement.deleteMany({ where: { id: statementId } });
   await prisma.bankAccount.deleteMany({
@@ -133,7 +143,7 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-describe("ignoreLineAction", () => {
+describe.skipIf(!HAS_DB)("ignoreLineAction", () => {
   it("marks an UNMATCHED line as IGNORED + decrements pendingLines", async () => {
     const line = bankLines[1]; // the internal-transfer line
     const before = await prisma.bankStatement.findUniqueOrThrow({
@@ -226,7 +236,7 @@ describe("ignoreLineAction", () => {
   });
 });
 
-describe("unignoreLineAction", () => {
+describe.skipIf(!HAS_DB)("unignoreLineAction", () => {
   it("restores an IGNORED line to UNMATCHED + increments pendingLines", async () => {
     const line = bankLines[1]; // Same internal-transfer line from above.
     const before = await prisma.bankStatement.findUniqueOrThrow({
