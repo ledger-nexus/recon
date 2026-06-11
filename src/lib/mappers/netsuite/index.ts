@@ -34,3 +34,10 @@ export {
   type ImportFromNsReconResult,
   type ImportStatementResult,
 } from "./import";
+
+export {
+  exportToNsRecon,
+  diffNsReconExports,
+  type ExportToNsReconInput,
+  type ExportToNsReconResult,
+} from "./export";
