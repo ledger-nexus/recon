@@ -117,3 +117,17 @@ Always use `Decimal` from `decimal.js`. Bank amounts are signed (positive = depo
 1. Read this file.
 2. Read `docs/ARCHITECTURE.md` (the relationship to ledger-core).
 3. Confirm: does this work belong in recon (suggesting / matching) or ledger-core (posting / reporting)?
+
+## SOC 2 / Deficiency-log re-audit pattern (institutionalized 2026-06-06)
+
+**Before opening an engineering PR to close a tracked deficiency in `docs/policies/control-deficiency-log.md`, re-audit whether the closure is already on main.** The deficiency log can lag architectural reality — a status flip from Open → Remediated may be a doc PR away, not engineering work.
+
+**Re-audit playbook** (proven in ledger-core — closed the only Critical-severity Open deficiency via doc-only PRs):
+
+1. Read the deficiency row's "Description" carefully — what's the attack/gap?
+2. `git log --all --oneline -- <relevant_file_path>` — does main have a commit addressing it?
+3. `git show main:<path>` — does the layered defense already exist?
+4. Look for verification tests (`tests/<feature>.test.ts`)
+5. If all three answer YES, the deficiency is **Remediated**. Open a doc-only PR flipping the status + amending readiness % + risk register score.
+
+This pattern surfaces hidden Remediated state that would otherwise sit as Open in the log, creating a false picture of audit-readiness.
