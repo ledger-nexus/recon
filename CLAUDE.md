@@ -1,3 +1,18 @@
+<!-- BEGIN multi-session-orchestrator amendment (v1) -->
+
+## ⚠️ Multi-session coordination (READ FIRST)
+
+This repo may have parallel Claude sessions — they clobber each other's writes without coordination.
+
+1. **Read `STATUS.md`** at the repo root before editing any file. If your task overlaps an active claim, pick a different task or surface the conflict to the user.
+2. **Claim your scope** before your first edit: append a `### Session <id>` block to STATUS.md under "Active claims" with scope / files-globs / branch / heartbeat (format documented in STATUS.md). Commit STATUS.md atomically.
+3. **Heartbeat** every ~20 turns. Small commit.
+4. **Release** at session end: move your block to "Recent completions" with an outcome line. Commit.
+
+Never edit another session's claim, skip the read, or claim `**`.
+
+<!-- END multi-session-orchestrator amendment -->
+
 # Claude Code Instructions for recon
 
 Auto-loaded by Claude Code on every session in this repo.
