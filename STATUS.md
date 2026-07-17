@@ -26,7 +26,11 @@ Update your own heartbeat every ~20 turns. If your heartbeat is older
 than 60 minutes, other sessions may consider your claim stale.
 -->
 
-_No active claims._
+### Session wonderful-moser · started 2026-07-16 · heartbeat (session start)
+- **Scope**: Re-sync ledger-core schema mirror to v1.25 (stale-mirror fix); add db:diff protocol, ban db push
+- **Files / globs**: `prisma/schema.prisma`, `package.json`, `CLAUDE.md`, `docs/ARCHITECTURE.md`, `STATUS.md`
+- **Branch**: `claude/wonderful-moser-e7b15d`
+- **Working dir**: `/Users/hosungson/Code/recon/.claude/worktrees/wonderful-moser-e7b15d`
 
 ---
 
