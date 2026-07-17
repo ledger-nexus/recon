@@ -26,11 +26,7 @@ Update your own heartbeat every ~20 turns. If your heartbeat is older
 than 60 minutes, other sessions may consider your claim stale.
 -->
 
-### Session wonderful-moser · started 2026-07-16 · heartbeat (session start)
-- **Scope**: Re-sync ledger-core schema mirror to v1.25 (stale-mirror fix); add db:diff protocol, ban db push
-- **Files / globs**: `prisma/schema.prisma`, `package.json`, `CLAUDE.md`, `docs/ARCHITECTURE.md`, `STATUS.md`
-- **Branch**: `claude/wonderful-moser-e7b15d`
-- **Working dir**: `/Users/hosungson/Code/recon/.claude/worktrees/wonderful-moser-e7b15d`
+_No active claims._
 
 ---
 
@@ -48,7 +44,10 @@ Example:
 - **Outcome**: one-line result
 -->
 
-_No recent completions yet._
+### Session wonderful-moser · 2026-07-16 (commit `18f3c78`)
+- **Scope**: Re-synced the ledger-core schema mirror to main@9442667 (FK-closed regeneration), removed db:push/db:migrate, added db:diff + reviewed-diff protocol in schema header / CLAUDE.md / ARCHITECTURE.md
+- **Branch**: `claude/wonderful-moser-e7b15d` (pushed; PR #34 open against main)
+- **Outcome**: migrate diff vs shared dev DB shows 0 statements touching mirrored or recon-owned objects; tsc clean; 132/132 tests pass. Same fix PR'd portfolio-wide: revenue-rec #37, fa-amort #30, integrations #27.
 
 ---
 
