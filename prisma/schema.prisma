@@ -2,17 +2,37 @@
 //
 // Two halves:
 //
-//   1. ledger-core models recon QUERIES (LegalEntity, Book, Account,
-//      JournalEntry, JournalLine, Party, Currency, Period, FiscalCalendar).
-//      These mirror the canonical definitions in ledger-core's schema —
-//      column-for-column. recon does NOT migrate these tables; ledger-core
-//      owns the schema. If ledger-core's schema changes upstream, this
-//      copy MUST be re-synced.
+//   1. ledger-core models recon QUERIES (Tenant, TenantMembership, User,
+//      LegalEntity, Book, Account, Party, JournalEntry, JournalLine,
+//      Currency, Period, FiscalCalendar, Item, DimensionSet). These mirror
+//      the canonical definitions in ledger-core's schema — column-for-column,
+//      relations trimmed to the mirrored set. recon does NOT migrate these
+//      tables; ledger-core owns them. This mirror was GENERATED from
+//      ledger-core's schema at v1.25 (main commit 9442667, 2026-07-16) —
+//      re-generate on upstream schema change, never hand-drift.
+//
+//      The mirror is FK-CLOSED: every foreign key on a mirrored table points
+//      at another mirrored table, so `npm run db:diff` produces ZERO
+//      statements against ledger-core-owned tables. If the diff ever shows a
+//      statement against one of them, the mirror has drifted — re-generate it
+//      from ledger-core before doing anything else.
 //
 //   2. recon-specific models recon OWNS (BankAccount, BankStatement,
-//      BankStatementLine, ReconciliationMatch, AiSuggestion). These live
-//      only here; `prisma db push` from this repo creates them on top of
-//      the existing ledger-core tables.
+//      BankStatementLine, ReconciliationMatch, AiSuggestion). Schema changes
+//      to the shared DB are applied via a REVIEWED `prisma migrate diff`
+//      script — NEVER `prisma db push` or `migrate dev`. Because this schema
+//      declares only a subset of the shared database, a blind push would
+//      execute the full diff, including DROP/ALTER statements against every
+//      shared table this file doesn't declare (or declares incorrectly).
+//      Protocol:
+//
+//        1. npm run db:diff                    # migrate diff → SQL script
+//        2. Review: keep ONLY statements touching recon-owned tables
+//           (bank_account, bank_statement, bank_statement_line,
+//           reconciliation_match, ai_suggestion) and recon-owned enums
+//           (BankLineStatus, MatchSource, MatchStatus). Everything else is
+//           subset-of-shared-DB noise and MUST NOT run.
+//        3. npx prisma db execute --file <reviewed.sql>
 //
 // The two repos share one Postgres database — recon connects with the same
 // DATABASE_URL as ledger-core. Per the universal-schema spec: "Postgres
@@ -29,44 +49,207 @@ datasource db {
 }
 
 // =========================================================================
-// ledger-core mirror — DO NOT EDIT without syncing upstream
+// ledger-core mirror — DO NOT EDIT without re-syncing from ledger-core
 // =========================================================================
 
-model LegalEntity {
-  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Phase 4b in ledger-core: code is unique per [tenantId, code], not globally.
-  // SECURITY (pen-test pass 4): tenantId added so Server Actions can
-  // tenant-scope their record lookups. The column exists in the shared
-  // DB; declaring it here lets recon's Prisma client filter by it.
-  tenantId             String   @db.Uuid
-  code                 String
-  name                 String
-  parentEntityId       String?  @db.Uuid
-  functionalCurrencyId String
-  sourceSystem         String?
-  sourceRecordType     String?
-  sourceRecordId       String?
-  sourcePayload        Json?
-  mappingVersion       String?
-  extensions           Json?
+enum TenantRole {
+  OWNER // cannot be removed; can delete the tenant
+  ADMIN // full read+write+admin (period close, user lifecycle)
+  MEMBER // read+write, no admin actions
+}
 
-  journalEntries JournalEntry[]
-  bankAccounts   BankAccount[]
+enum BookBasis {
+  US_GAAP
+  US_TAX
+  IFRS
+  MGMT
+  STATUTORY
+}
+
+enum PeriodFrequency {
+  MONTHLY
+  QUARTERLY
+  WEEKLY_4_4_5
+  WEEKLY_4_5_4
+  WEEKLY_5_4_4
+  CUSTOM
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+enum TranslationCategory {
+  CURRENT_RATE
+  HISTORICAL
+  WEIGHTED_AVG
+  EXCLUDED
+}
+
+enum JournalSource {
+  MANUAL // entered by a human via the UI
+  SEED // loaded from seed data
+  SYSTEM // posted by another module (e.g. rev rec engine)
+  AI_APPROVED // AI suggested, human approved (used in recon project)
+  IMPORT // ERP import (companion to source_system lineage)
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+  VOID
+  REVERSED
+}
+
+enum OwnerType {
+  USER
+  QUEUE
+}
+
+enum ItemType {
+  INVENTORY
+  NON_INVENTORY
+  SERVICE
+  KIT
+  ASSEMBLY
+  FIXED_ASSET
+}
+
+enum CostingMethod {
+  FIFO
+  LIFO
+  AVERAGE
+  STANDARD
+  SPECIFIC
+}
+
+model Tenant {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String @unique // url-safe, e.g. "acme-co"
+  name        String
+  ownerUserId String @db.Uuid
+
+  memberships TenantMembership[]
+
+  // Backrefs from tenant-scoped domain models (mirrored subset only).
+  legalEntities   LegalEntity[]
+  fiscalCalendars FiscalCalendar[]
+  periods         Period[]
+  parties         Party[]
+  items           Item[]
+  accounts        Account[]
+  journalEntries  JournalEntry[]
+  journalLines    JournalLine[]
+  dimensionSets   DimensionSet[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete
+
+  @@index([ownerUserId])
+  @@map("tenant")
+}
+
+model TenantMembership {
+  id       String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  role     TenantRole @default(MEMBER)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("tenant_membership")
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique
+  displayName   String
+  isActive      Boolean   @default(true)
+  deactivatedAt DateTime?
+
+  // Multi-tenancy: a User can belong to N Tenants via TenantMembership.
+  // User itself is global (no tenantId) — login lookup is global by email.
+  tenantMemberships TenantMembership[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@map("app_user")
+}
+
+model LegalEntity {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String        @db.Uuid
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  // Phase 4b: code is unique PER tenant. Two tenants can both own
+  // an entity coded "ACME" — collisions are isolated by tenantId.
+  code           String
+  name           String
+  parentEntityId String?       @db.Uuid
+  parent         LegalEntity?  @relation("EntityHierarchy", fields: [parentEntityId], references: [id])
+  children       LegalEntity[] @relation("EntityHierarchy")
+
+  // The currency this entity reports in. Each book may override for reporting.
+  functionalCurrencyId String
+  functionalCurrency   Currency @relation("EntityFunctionalCcy", fields: [functionalCurrencyId], references: [code])
+
+  // NetSuite OneWorld: one subsidiary per group is the "elimination
+  // subsidiary" — its only postings are the intercompany eliminations
+  // the consolidation engine generates.
+  isEliminationEntity Boolean @default(false)
+
+  // Lineage — null for natively-created entities; populated on ERP import.
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  fiscalCalendars FiscalCalendar[]
+  accounts        Account[]
+  journalEntries  JournalEntry[]
+  parties         Party[]
+  items           Item[]
+
+  // Backref to recon's own tables.
+  bankAccounts BankAccount[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
   @@map("legal_entity")
 }
 
 model Book {
   id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code                String    @unique
+  code                String    @unique // e.g. "US_GAAP", "US_TAX", "IFRS", "MGMT"
   name                String
+  // The accounting basis. Drives default behavior in posting rules + reports.
   basis               BookBasis
+  // Reporting currency for THIS book. Functional currency lives on LegalEntity.
   reportingCurrencyId String
-  isActive            Boolean   @default(true)
-  extensions          Json?
+  reportingCurrency   Currency  @relation("BookReportingCcy", fields: [reportingCurrencyId], references: [code])
+
+  isActive   Boolean @default(true)
+  extensions Json?
 
   journalEntries JournalEntry[]
 
@@ -76,44 +259,74 @@ model Book {
   @@map("book")
 }
 
-model Account {
-  id               String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId         String? @db.Uuid
-  code             String
-  name             String
-  type             AccountType
-  normalBalance    NormalBalance
-  subtype          String?
-  isContra         Boolean @default(false)
-  isControlAccount Boolean @default(false)
-  isBank           Boolean @default(false)
-  parentAccountId  String? @db.Uuid
-  bookScope        String[] @default([])
-  active           Boolean @default(true)
+model FiscalCalendar {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId        String          @db.Uuid
+  entity          LegalEntity     @relation(fields: [entityId], references: [id])
+  code            String // e.g. "STANDARD_2026"
+  name            String
+  periodFrequency PeriodFrequency @default(MONTHLY)
 
-  lines        JournalLine[]
-  bankAccounts BankAccount[]
-
-  sourceSystem     String?
-  sourceRecordType String?
-  sourceRecordId   String?
-  sourcePayload    Json?
-  mappingVersion   String?
-  extensions       Json?
+  periods Period[]
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
-  @@map("account")
+  @@index([tenantId])
+  @@map("fiscal_calendar")
+}
+
+model Period {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String         @db.Uuid
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  calendarId String         @db.Uuid
+  calendar   FiscalCalendar @relation(fields: [calendarId], references: [id])
+  code       String // e.g. "2026-01", "2026-Q1"
+  ordinal    Int // 1..12 for monthly, 1..52 for weekly
+  startsOn   DateTime       @db.Date
+  endsOn     DateTime       @db.Date
+
+  journalEntries JournalEntry[]
+
+  @@unique([calendarId, code])
+  @@unique([calendarId, ordinal])
+  @@index([startsOn, endsOn])
+  @@index([tenantId])
+  @@map("period")
+}
+
+model Currency {
+  // ISO 4217 code is the primary key — these are stable.
+  code     String  @id // "USD", "EUR", "JPY"
+  name     String
+  decimals Int     @default(2) // 2 for USD, 0 for JPY, etc.
+  symbol   String?
+
+  entitiesFunctional LegalEntity[]  @relation("EntityFunctionalCcy")
+  booksReporting     Book[]         @relation("BookReportingCcy")
+  journalEntries     JournalEntry[] @relation("JeCurrency")
+  linesTxn           JournalLine[]  @relation("LineTxnCcy")
+  linesReporting     JournalLine[]  @relation("LineReportingCcy")
+
+  @@map("currency")
 }
 
 model Party {
-  id            String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entityId      String? @db.Uuid
-  code          String
-  displayName   String
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId    String?      @db.Uuid // null = shared across entities
+  entity      LegalEntity? @relation(fields: [entityId], references: [id])
+  code        String // human-readable, often source-system code
+  displayName String
+
+  // Customer:Job / Project / WBS / Sage Job all collapse to one Party with parent.
   parentPartyId String? @db.Uuid
+  parent        Party?  @relation("PartyHierarchy", fields: [parentPartyId], references: [id])
+  children      Party[] @relation("PartyHierarchy")
 
   journalLines JournalLine[]
 
@@ -128,27 +341,28 @@ model Party {
   updatedAt DateTime @updatedAt
 
   @@unique([entityId, code])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "party_extensions_gin", type: Gin)
   @@map("party")
 }
 
-model JournalEntry {
-  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  // Phase 4b: entryNumber unique per [tenantId, entryNumber] in ledger-core.
-  // No tenantId in this mirror; drop @unique, callers use findFirst.
-  entryNumber   String
-  entityId      String   @db.Uuid
-  entity        LegalEntity @relation(fields: [entityId], references: [id])
-  bookId        String   @db.Uuid
-  book          Book        @relation(fields: [bookId], references: [id])
-  periodId      String?  @db.Uuid
-  documentDate  DateTime @db.Date
-  postingDate   DateTime @db.Date
-  memo          String
-  currencyId    String
-  fxRate        Decimal  @default(1) @db.Decimal(20, 10)
-  source        JournalSource @default(MANUAL)
-  status        EntryStatus   @default(POSTED)
-  reversalOfId  String?  @db.Uuid
+model Item {
+  id                          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                    String         @db.Uuid
+  tenant                      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entityId                    String?        @db.Uuid
+  entity                      LegalEntity?   @relation(fields: [entityId], references: [id])
+  code                        String
+  name                        String
+  itemType                    ItemType       @default(SERVICE)
+  costingMethod               CostingMethod?
+  defaultIncomeAccountCode    String?
+  defaultExpenseAccountCode   String?
+  defaultInventoryAccountCode String?
+
+  journalLines JournalLine[]
 
   sourceSystem     String?
   sourceRecordType String?
@@ -157,39 +371,200 @@ model JournalEntry {
   mappingVersion   String?
   extensions       Json?
 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([tenantId])
+  @@map("item")
+}
+
+model Account {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entityId null = shared across all entities (consolidated chart).
+  entityId String?      @db.Uuid
+  entity   LegalEntity? @relation(fields: [entityId], references: [id])
+
+  // Human-readable code (e.g. "1000" for Cash). NOT a source-system primary key.
+  code             String
+  name             String
+  type             AccountType
+  normalBalance    NormalBalance
+  subtype          String? // e.g. "CASH", "AR_TRADE", "INVENTORY_RAW"
+  isContra         Boolean       @default(false)
+  isControlAccount Boolean       @default(false) // true for AR/AP control accounts
+  isBank           Boolean       @default(false)
+
+  // ASC 830 / IAS 21: monetary accounts are re-measured at period-end CLOSE
+  // rate; non-monetary accounts stay at historical rate.
+  isMonetary Boolean @default(false)
+
+  // FX Phase 4 — ASC 830 translation method for CONSOLIDATION. Nullable so
+  // existing single-currency installations don't need a backfill.
+  translationCategory TranslationCategory?
+
+  parentAccountId String?   @db.Uuid
+  parent          Account?  @relation("AccountHierarchy", fields: [parentAccountId], references: [id])
+  children        Account[] @relation("AccountHierarchy")
+
+  // Books this account applies to. Empty = applies to all books.
+  bookScope String[] @default([])
+
+  active Boolean @default(true)
+
+  // BlackLine arc Phase 1: per-account override of the tenant default.
+  requiresReconReview Boolean?
+  reconTolerance      Decimal? @db.Decimal(20, 4)
+
   lines JournalLine[]
 
-  // Backrefs to recon's own tables.
-  appliedReconciliationMatches ReconciliationMatch[] @relation("AppliedByReconEntry")
+  // Backref to recon's own tables.
+  bankAccounts BankAccount[]
+
+  sourceSystem     String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  sourcePayload    Json?
+  mappingVersion   String?
+  extensions       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([entityId, code])
+  @@index([type])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "account_extensions_gin", type: Gin)
+  @@map("account")
+}
+
+model JournalEntry {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  // entryNumber is a human-readable sequential ID.
+  // Phase 4b: unique per [tenantId, entryNumber].
+  entryNumber String
+
+  entityId String      @db.Uuid
+  entity   LegalEntity @relation(fields: [entityId], references: [id])
+  bookId   String      @db.Uuid
+  book     Book        @relation(fields: [bookId], references: [id])
+
+  // periodId is resolved at posting time from the document/posting date and
+  // the entity's fiscal calendar.
+  periodId String? @db.Uuid
+  period   Period? @relation(fields: [periodId], references: [id])
+
+  documentDate DateTime @db.Date
+  postingDate  DateTime @db.Date
+
+  memo String
+
+  currencyId String
+  currency   Currency @relation("JeCurrency", fields: [currencyId], references: [code])
+  fxRate     Decimal  @default(1) @db.Decimal(20, 10)
+
+  source JournalSource @default(MANUAL)
+  status EntryStatus   @default(POSTED)
+
+  reversalOfId String?        @db.Uuid
+  reversalOf   JournalEntry?  @relation("Reversal", fields: [reversalOfId], references: [id])
+  reversedBy   JournalEntry[] @relation("Reversal")
+
+  // Lineage — non-negotiable per spec. Populated on every ERP import.
+  sourceSystem     String? // "QBO", "NETSUITE", "INTACCT", ...
+  sourceRecordType String? // "Invoice", "Bill", "JournalEntry", ...
+  sourceRecordId   String? // the source system's ID (NEVER reused as our PK)
+  sourcePayload    Json? // frozen raw original
+  mappingVersion   String?
+  extensions       Json?
+
+  // Denormalized line sums. Per the invariant that debits == credits,
+  // these are equal on every well-formed entry (postJournalEntry
+  // enforces this). Populated by ledger-core on every new entry.
+  totalDebit  Decimal @default(0) @db.Decimal(18, 4)
+  totalCredit Decimal @default(0) @db.Decimal(18, 4)
+
+  lines JournalLine[]
+
+  // Ownership + audit. ownerId is the default-responsible-party (see
+  // ledger-core docs/ownership-and-rules.md). Polymorphic (User OR Queue,
+  // discriminated by ownerType) — no FK relation by design.
+  ownerId              String?   @db.Uuid
+  ownerType            OwnerType @default(USER)
+  updatedBy            String?
+  updatedAt            DateTime  @default(now()) @updatedAt
+  // When set, the reassignment-rules engine SKIPS this record.
+  reassignmentLockedAt DateTime?
 
   createdAt DateTime @default(now())
   createdBy String?
 
+  // Backref to recon's own tables.
+  appliedReconciliationMatches ReconciliationMatch[] @relation("AppliedByReconEntry")
+
+  @@unique([tenantId, entryNumber])
+  @@index([ownerId])
   @@index([entityId, bookId, documentDate])
+  @@index([entityId, bookId, periodId])
+  @@index([sourceSystem, sourceRecordType, sourceRecordId])
+  @@index([tenantId, postingDate])
+  // Created by ledger-core's raw SQL (migrations 0001_constraints + 0019);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "gl_entry_header_extensions_gin", type: Gin)
+  @@index([tenantId, totalDebit], map: "gl_entry_header_total_debit_idx")
   @@map("gl_entry_header")
 }
 
 model JournalLine {
-  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  entryId   String @db.Uuid
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // tenantId denormalized from the parent JournalEntry for query speed.
+  // Always equals entry.tenantId; enforced in ledger-core's postJournalEntry.
+  tenantId  String       @db.Uuid
+  tenant    Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  entryId   String       @db.Uuid
   entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
-  lineNo    Int
-  accountId String @db.Uuid
-  account   Account @relation(fields: [accountId], references: [id])
+  lineNo    Int // 1-based, position within entry
+  accountId String       @db.Uuid
+  account   Account      @relation(fields: [accountId], references: [id])
 
-  partyId        String? @db.Uuid
-  party          Party?  @relation(fields: [partyId], references: [id])
-  itemId         String? @db.Uuid
-  dimensionSetId String? @db.Uuid
-  taxCodeId      String?
+  // Sub-ledger keys — nullable.
+  partyId String? @db.Uuid
+  party   Party?  @relation(fields: [partyId], references: [id])
+  itemId  String? @db.Uuid
+  item    Item?   @relation(fields: [itemId], references: [id])
 
+  // Layer 3 — dimension engine.
+  dimensionSetId String?       @db.Uuid
+  dimensionSet   DimensionSet? @relation(fields: [dimensionSetId], references: [id])
+
+  // taxCodeId — slot. TaxCode table arrives with the document layer in a
+  // consumer repo.
+  taxCodeId String?
+
+  // The canonical debit/credit pair in the BOOK's reporting currency.
+  // XOR constraint enforced at the DB layer (ledger-core migration SQL).
   debit  Decimal @default(0) @db.Decimal(18, 4)
   credit Decimal @default(0) @db.Decimal(18, 4)
 
-  transactionAmount     Decimal @default(0) @db.Decimal(18, 4)
+  // Transaction-currency view (signed: debit positive, credit negative).
+  transactionAmount     Decimal   @default(0) @db.Decimal(18, 4)
   transactionCurrencyId String?
-  reportingAmount       Decimal @default(0) @db.Decimal(18, 4)
-  reportingCurrencyId   String?
+  transactionCurrency   Currency? @relation("LineTxnCcy", fields: [transactionCurrencyId], references: [code])
+
+  // Reporting-currency view (signed).
+  reportingAmount     Decimal   @default(0) @db.Decimal(18, 4)
+  reportingCurrencyId String?
+  reportingCurrency   Currency? @relation("LineReportingCcy", fields: [reportingCurrencyId], references: [code])
 
   description String?
   extensions  Json?
@@ -198,8 +573,32 @@ model JournalLine {
   reconciliationMatches ReconciliationMatch[] @relation("MatchedJournalLine")
 
   @@unique([entryId, lineNo])
+  @@index([entryId])
   @@index([accountId])
+  @@index([partyId])
+  @@index([tenantId])
+  // Created by ledger-core's raw SQL (prisma/migrations/0001_constraints);
+  // declared here so db:diff stays clean (zero ledger-core statements).
+  @@index([extensions(ops: JsonbOps)], map: "gl_entry_line_extensions_gin", type: Gin)
   @@map("gl_entry_line")
+}
+
+// A deduplicated combination of dimension values. Mirrored (without the
+// bridge tables) so gl_entry_line.dimensionSetId keeps its FK declared.
+model DimensionSet {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId String @db.Uuid
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  // Stable hash of sorted (dimensionId, dimensionValueId) pairs.
+  hash     String
+
+  journalLines JournalLine[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, hash])
+  @@index([tenantId])
+  @@map("dimension_set")
 }
 
 // =========================================================================
@@ -372,87 +771,4 @@ model AiSuggestion {
 
   @@index([bankLineId])
   @@map("ai_suggestion")
-}
-
-// =========================================================================
-// Enums mirrored from ledger-core. MUST stay in sync. These exist in the
-// shared DB because ledger-core created them; recon's mirror needs the
-// matching type so Prisma db push from this repo doesn't try to alter
-// the columns ledger-core owns.
-// =========================================================================
-
-enum BookBasis {
-  US_GAAP
-  US_TAX
-  IFRS
-  MGMT
-  STATUTORY
-}
-
-enum AccountType {
-  ASSET
-  LIABILITY
-  EQUITY
-  REVENUE
-  EXPENSE
-}
-
-enum NormalBalance {
-  DEBIT
-  CREDIT
-}
-
-enum JournalSource {
-  MANUAL
-  SEED
-  SYSTEM
-  AI_APPROVED
-  IMPORT
-}
-
-enum EntryStatus {
-  DRAFT
-  POSTED
-  VOID
-  REVERSED
-}
-
-// ─── Shared multi-tenancy tables ────────────────────────────────────────
-//
-// SECURITY (pen-test pass 4): these tables live in the shared DB (owned
-// by ledger-core's schema). recon needs read access to them to resolve
-// the current Clerk-authenticated user → their TenantMembership → the
-// current tenant for Server Action scoping. We declare just enough
-// columns to make typed Prisma queries; we never write to them from
-// recon. The tables already exist in the DB; no migration needed.
-
-model User {
-  id          String  @id @db.Uuid
-  email       String  @unique
-  displayName String
-  isActive    Boolean @default(true)
-  memberships TenantMembership[]
-
-  @@map("app_user")
-}
-
-model Tenant {
-  id          String  @id @db.Uuid
-  slug        String  @unique
-  name        String
-  memberships TenantMembership[]
-
-  @@map("tenant")
-}
-
-model TenantMembership {
-  tenantId String @db.Uuid
-  userId   String @db.Uuid
-  role     String
-
-  tenant Tenant @relation(fields: [tenantId], references: [id])
-  user   User   @relation(fields: [userId], references: [id])
-
-  @@unique([tenantId, userId])
-  @@map("tenant_membership")
 }

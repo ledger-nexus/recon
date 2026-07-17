@@ -8,7 +8,7 @@
 |---|---|---|
 | Owns the schema for | `JournalEntry`, `JournalLine`, `Account`, `LegalEntity`, `Book`, sub-ledgers, dimensions | `BankAccount`, `BankStatement`, `BankStatementLine`, `ReconciliationMatch`, `AiSuggestion` |
 | Writes JEs | Yes — `postJournalEntry` is its export | **No** — recon never writes the GL directly |
-| Runs `prisma db push` | Yes — canonical migration source | Only for its own tables (additive only) |
+| Applies schema changes | Yes — canonical migration source | **Never `db push`** — reviewed `db:diff` → filtered SQL → `db execute` (see "Schema-safety protocol") |
 | Has AI at runtime | **No** — deterministic | **Yes** — match suggestions via Claude API (v0.2+) |
 | Has a UI | Yes — `/journal-entries`, reports | Yes — `/statements`, match approval (v0.2+) |
 | Production posture | "Belt-and-suspenders correctness" | "Suggest fast, let humans confirm" |
@@ -25,16 +25,23 @@ For a portfolio project this is a fine trade-off. In production at scale you'd a
 
 ## The schema mirror
 
-`recon/prisma/schema.prisma` declares six models that already exist in ledger-core: `LegalEntity`, `Book`, `Account`, `Party`, `JournalEntry`, `JournalLine`. **These are read-only contracts** — recon uses them to query but does NOT include the full ledger-core surface (no Sub-ledgers, no dimension engine, no posting rules).
+`recon/prisma/schema.prisma` declares the ledger-core models recon queries: `Tenant`, `TenantMembership`, `User`, `LegalEntity`, `Book`, `Account`, `Party`, `JournalEntry`, `JournalLine`, `Currency`, `Period`, `FiscalCalendar`, `Item`, `DimensionSet`. **These are read-only contracts** — recon uses them to query but does NOT include the full ledger-core surface (no sub-ledgers, no posting rules).
 
-Running `prisma db push` from recon's directory will:
+The mirror is **generated from ledger-core's current schema** (the generation commit is recorded in the schema header), with relation fields trimmed to the mirrored set. It is **FK-closed**: every foreign key on a mirrored table points at another mirrored table, so a `prisma migrate diff` against the shared DB produces zero statements touching ledger-core-owned tables. Never hand-edit the mirror; re-generate it from ledger-core when the upstream schema changes.
 
-- See the mirrored tables already exist (created by ledger-core's push) and leave them alone
-- See recon's new tables don't exist and create them
+## Schema-safety protocol (never `db push`)
 
-If ledger-core's schema changes (a new column on `Account`, say), the recon mirror gets out of sync. Until you re-sync, recon's Prisma client may have fewer fields than the actual table. Runtime queries still work (Prisma ignores unknown DB columns), but you lose type-checking on the new field.
+An earlier version of this doc claimed `prisma db push` from recon was safe because it "leaves existing tables alone." **That claim was wrong and dangerous.** `db push` executes the FULL diff between this schema and the shared database — and because recon's schema declares only a subset of that database, the diff includes DROP/ALTER statements against every shared table recon doesn't declare (or declares incorrectly). A stale mirror turns `db push` into silent destruction of ledger-core columns. (xbrl-filer measured this concretely: its first diff produced 284 statements, 263 of them destructive to other repos' tables.)
 
-**Mitigation:** treat this file like a contract. When you make a schema change in ledger-core, update recon's mirror in the same PR or open an issue.
+Schema changes to recon-owned tables are applied via a reviewed diff instead:
+
+1. `npm run db:diff` — prints the full SQL diff (never applies anything)
+2. Review: keep ONLY statements touching recon-owned tables (`bank_account`, `bank_statement`, `bank_statement_line`, `reconciliation_match`, `ai_suggestion`) and recon-owned enums. Everything else is subset-of-shared-DB noise and must not run.
+3. `npx prisma db execute --file <reviewed.sql>`
+
+Verification invariant: because the mirror is FK-closed and generated from ledger-core's current schema, the `db:diff` output contains **zero** statements naming a mirrored table. If one ever appears, the mirror has drifted — re-generate it from ledger-core before doing anything else.
+
+If ledger-core's schema changes (a new column on `Account`, say), the recon mirror gets out of sync. Runtime queries still work (Prisma ignores unknown DB columns), but you lose type-checking on the new field and the drift invariant above starts failing. Re-generate the mirror in the same PR as the ledger-core change, or open an issue.
 
 ## The write path — AI never posts directly
 

@@ -27,7 +27,7 @@ The architecture canon is `docs/ARCHITECTURE.md`. Read it before changing how re
 
 1. **AI suggests; humans approve; ledger-core posts.** No code path in this repo may write to ledger-core's tables directly. Adjustment JEs cross the boundary via the HTTP bridge in `src/lib/ledger-bridge.ts`, which POSTs to ledger-core's `/api/internal/journal-entries` endpoint. That endpoint is the ONLY way recon writes to the substrate. AI-influenced entries use `source: "AI_APPROVED"`; human-only entries use `source: "MANUAL"`.
 
-2. **Recon's schema mirror is a contract.** The six ledger-core models in `prisma/schema.prisma` (LegalEntity, Book, Account, Party, JournalEntry, JournalLine) must match ledger-core's definitions column-for-column. If you change them here, you've broken the contract.
+2. **Recon's schema mirror is a contract — and `db push` is banned.** The ledger-core models in `prisma/schema.prisma` (Tenant, TenantMembership, User, LegalEntity, Book, Account, Party, JournalEntry, JournalLine, Currency, Period, FiscalCalendar, Item, DimensionSet) are GENERATED from ledger-core's current schema, column-for-column, FK-closed. Never hand-edit them; re-generate from ledger-core on upstream change. Schema changes to recon-owned tables apply via the reviewed-diff protocol (`npm run db:diff` → keep ONLY statements touching recon-owned tables → `prisma db execute`) — NEVER `prisma db push` or `migrate dev`, which would execute the full diff including destructive statements against shared tables the mirror doesn't declare (or declares stale). See `docs/ARCHITECTURE.md` "Schema-safety protocol".
 
 3. **Parser failures must be loud.** The CSV parser asserts `Σ lines = Δ balance` and throws if it doesn't reconcile. Silent parser drift is the worst kind of bug in this domain.
 
@@ -95,7 +95,7 @@ Always use `Decimal` from `decimal.js`. Bank amounts are signed (positive = depo
 
 ### Database
 - Import `prisma` from `@/lib/db` (the singleton). Never `new PrismaClient()` in a page or component.
-- Recon's `prisma db push` only touches recon-owned tables. If you add a new model, it must NOT shadow an existing ledger-core table.
+- Never `prisma db push` / `migrate dev` in this repo (destructive against the shared DB when the mirror is stale). New recon-owned tables ship via the reviewed-diff protocol: `npm run db:diff` → keep only recon-owned-table statements → `prisma db execute`. A new model must NOT shadow an existing ledger-core table.
 - Querying ledger-core's tables is fine; writing to them via Prisma is forbidden (the schema mirror gives you read-only contracts, but Prisma doesn't enforce that — discipline does).
 
 ### AI integration (v0.2+)
